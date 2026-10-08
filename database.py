@@ -56,16 +56,25 @@ async def init_db():
                 price_uzs INTEGER,
                 photo_file_id TEXT,
                 payment_status TEXT DEFAULT 'qarzdor',
-                created_at TEXT
+                created_at TEXT,
+                client_msg_id INTEGER,
+                channel_msg_id INTEGER,
+                channel_chat_id TEXT
             );
         """)
         await db.execute("CREATE INDEX IF NOT EXISTS idx_reports_id_code ON reports(id_code);")
 
-        # Column migration if reports was created earlier without payment_status
+        # Column migration if reports was created earlier without payment_status or message tracking
         async with db.execute("PRAGMA table_info(reports);") as cursor:
             cols = [row[1] for row in await cursor.fetchall()]
             if "payment_status" not in cols:
                 await db.execute("ALTER TABLE reports ADD COLUMN payment_status TEXT DEFAULT 'qarzdor';")
+            if "client_msg_id" not in cols:
+                await db.execute("ALTER TABLE reports ADD COLUMN client_msg_id INTEGER;")
+            if "channel_msg_id" not in cols:
+                await db.execute("ALTER TABLE reports ADD COLUMN channel_msg_id INTEGER;")
+            if "channel_chat_id" not in cols:
+                await db.execute("ALTER TABLE reports ADD COLUMN channel_chat_id TEXT;")
 
         await db.execute("""
             CREATE TABLE IF NOT EXISTS settings (
@@ -295,8 +304,9 @@ async def save_report(report_data: dict) -> int:
         cursor = await db.execute("""
             INSERT INTO reports (
                 user_id, id_code, full_name, phone, track_codes,
-                weight, price_usd, price_uzs, photo_file_id, payment_status, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'qarzdor', ?)
+                weight, price_usd, price_uzs, photo_file_id, payment_status, created_at,
+                client_msg_id, channel_msg_id, channel_chat_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'qarzdor', ?, ?, ?, ?)
         """, (
             report_data.get("user_id"),
             report_data.get("id_code"),
@@ -307,7 +317,10 @@ async def save_report(report_data: dict) -> int:
             report_data.get("price_usd"),
             report_data.get("price_uzs"),
             report_data.get("photo_file_id"),
-            now
+            now,
+            report_data.get("client_msg_id"),
+            report_data.get("channel_msg_id"),
+            report_data.get("channel_chat_id")
         ))
         await db.commit()
         return cursor.lastrowid

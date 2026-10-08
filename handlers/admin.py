@@ -740,8 +740,103 @@ async def callback_edit_rep_weight(query: CallbackQuery, state: FSMContext):
         reply_markup=cancel_edit_report_keyboard(report_id, user_id)
     )
 
+async def sync_report_message_changes(bot: Bot, report_id: int, user_id: int, new_track_codes: str, new_weight: float, new_price_usd: float, new_price_uzs: int):
+    """
+    Tahrirlangan yuk hisobotini mijoz chatida va Telegram kanalda ham yangilaydi (edit caption).
+    """
+    report = await get_report_by_id(report_id)
+    user = await get_user(user_id)
+    if not user:
+        return
+
+    updated_caption = format_report_caption(
+        user=user,
+        track_codes=new_track_codes,
+        weight=new_weight,
+        price_usd=new_price_usd,
+        price_uzs=new_price_uzs,
+        is_preview=False
+    )
+
+    client_msg_id = report.get("client_msg_id") if report else None
+    channel_msg_id = report.get("channel_msg_id") if report else None
+    channel_chat_id = report.get("channel_chat_id") if report else None
+
+    # 1. Mijoz xabarini yangilash
+    client_edited = False
+    if client_msg_id:
+        try:
+            await bot.edit_message_caption(
+                chat_id=user_id,
+                message_id=client_msg_id,
+                caption=updated_caption,
+                parse_mode="HTML"
+            )
+            client_edited = True
+        except Exception as e:
+            logger.warning(f"Mijoz xabarini edit qilishda xatolik: {e}")
+
+    # Agar xabar edit qilinmasa (eski xabar yoki o'chirilgan bo'lsa), mijozga yangilanish xabari yuboramiz
+    if not client_edited:
+        try:
+            await bot.send_message(
+                chat_id=user_id,
+                text=f"🔄 <b>Hurmatli mijoz, yukingiz haqidagi ma'lumot yangilandi:</b>\n\n{updated_caption}",
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            logger.warning(f"Mijozga yangilanish xabari yuborishda xatolik: {e}")
+
+    # 2. Kanal xabarini yangilash
+    if channel_msg_id and channel_chat_id:
+        try:
+            target_ch = int(channel_chat_id) if channel_chat_id.startswith("-") and channel_chat_id[1:].isdigit() else channel_chat_id
+            await bot.edit_message_caption(
+                chat_id=target_ch,
+                message_id=channel_msg_id,
+                caption=updated_caption,
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            logger.warning(f"Kanal xabarini edit qilishda xatolik: {e}")
+
+async def sync_report_message_deletion(bot: Bot, report: dict, user_id: int):
+    """
+    O'chirilgan yuk hisobotini mijoz chatidan va Telegram kanaldan o'chiradi (delete_message).
+    """
+    client_msg_id = report.get("client_msg_id")
+    channel_msg_id = report.get("channel_msg_id")
+    channel_chat_id = report.get("channel_chat_id")
+    report_id = report.get("id")
+    track_codes = report.get("track_codes", "")
+
+    # 1. Mijoz chatidagi xabarni o'chirish
+    if client_msg_id:
+        try:
+            await bot.delete_message(chat_id=user_id, message_id=client_msg_id)
+        except Exception as e:
+            logger.warning(f"Mijoz xabarini o'chirishda xatolik: {e}")
+
+    # Mijozga bekor qilinganini xabar berish
+    try:
+        await bot.send_message(
+            chat_id=user_id,
+            text=f"ℹ️ <b>Hurmatli mijoz, avval yuborilgan ushbu yuk hisoboti (#{report_id}, Trek: <code>{html.escape(track_codes)}</code>) admin tomonidan bekor qilindi (o'chirildi).</b>",
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        logger.warning(f"Mijozga bekor qilish xabari yuborishda xatolik: {e}")
+
+    # 2. Kanal postini o'chirish
+    if channel_msg_id and channel_chat_id:
+        try:
+            target_ch = int(channel_chat_id) if channel_chat_id.startswith("-") and channel_chat_id[1:].isdigit() else channel_chat_id
+            await bot.delete_message(chat_id=target_ch, message_id=channel_msg_id)
+        except Exception as e:
+            logger.warning(f"Kanal xabarini o'chirishda xatolik: {e}")
+
 @admin_router.message(EditReportStates.entering_new_weight, F.text)
-async def state_save_new_weight(message: Message, state: FSMContext):
+async def state_save_new_weight(message: Message, state: FSMContext, bot: Bot):
     if not await check_admin_or_reject(message):
         return
 
@@ -780,13 +875,16 @@ async def state_save_new_weight(message: Message, state: FSMContext):
         new_price_uzs=price_uzs
     )
 
+    # 3. Mijoz va kanal xabarlarini yangilash
+    await sync_report_message_changes(bot, report_id, user_id, track_codes, new_weight, price_usd, price_uzs)
+
     await state.clear()
     await message.answer(
         f"✅ <b>Og'irlik va narx muvaffaqiyatli yangilandi!</b>\n\n"
         f"⚖️ Yangi og'irlik: <b>{new_weight} kg</b>\n"
         f"💵 Narx ($): <b>${price_usd}</b>\n"
         f"🇺🇿 Narx (so'm): <b>{price_uzs:,} so'm</b>\n\n"
-        f"<i>Google Sheets va ma'lumotlar bazasida yangilandi.</i>",
+        f"<i>Google Sheets, ma'lumotlar bazasi va mijoz/kanal xabarlarida yangilandi.</i>",
         parse_mode="HTML",
         reply_markup=report_manage_keyboard(report_id, user_id)
     )
@@ -823,7 +921,7 @@ async def callback_edit_rep_tracks(query: CallbackQuery, state: FSMContext):
     )
 
 @admin_router.message(EditReportStates.entering_new_tracks, F.text)
-async def state_save_new_tracks(message: Message, state: FSMContext):
+async def state_save_new_tracks(message: Message, state: FSMContext, bot: Bot):
     if not await check_admin_or_reject(message):
         return
 
@@ -851,11 +949,18 @@ async def state_save_new_tracks(message: Message, state: FSMContext):
         new_track_codes=new_track_codes
     )
 
+    # 3. Mijoz va kanal xabarlarini yangilash
+    rep = await get_report_by_id(report_id)
+    rep_w = rep.get("weight", 0.0) if rep else 0.0
+    rep_usd = rep.get("price_usd", 0.0) if rep else 0.0
+    rep_uzs = rep.get("price_uzs", 0) if rep else 0
+    await sync_report_message_changes(bot, report_id, user_id, new_track_codes, rep_w, rep_usd, rep_uzs)
+
     await state.clear()
     await message.answer(
         f"✅ <b>Trek-kod(lar) muvaffaqiyatli yangilandi!</b>\n\n"
         f"🔖 Yangi trek-kodlar:\n<code>{html.escape(new_track_codes)}</code>\n\n"
-        f"<i>Google Sheets va ma'lumotlar bazasida yangilandi.</i>",
+        f"<i>Google Sheets, ma'lumotlar bazasi va mijoz/kanal xabarlarida yangilandi.</i>",
         parse_mode="HTML",
         reply_markup=report_manage_keyboard(report_id, user_id)
     )
@@ -901,15 +1006,18 @@ async def callback_del_rep_do(query: CallbackQuery, bot: Bot):
     id_code = report.get("id_code", "")
     track_codes = report.get("track_codes", "")
 
-    # 1. Bazadan o'chirish
+    # 1. Mijoz va kanal postini o'chirish
+    await sync_report_message_deletion(bot, report, user_id)
+
+    # 2. Bazadan o'chirish
     await delete_report(report_id)
 
-    # 2. Google Sheetsdan o'chirish
+    # 3. Google Sheetsdan o'chirish
     await sheet_manager.delete_cargo_report(id_code, track_codes)
 
     await query.message.answer(
         f"🗑 <b>#{report_id} hisoboti muvaffaqiyatli o'chirildi!</b>\n"
-        f"Baza va Google Sheetsdan olib tashlandi.",
+        f"Baza, Google Sheets va Telegram xabarlaridan olib tashlandi.",
         parse_mode="HTML"
     )
 
@@ -1198,14 +1306,16 @@ async def callback_confirm_report(query: CallbackQuery, state: FSMContext, bot: 
     # 1. Send to client in Telegram
     user_sent = False
     user_err = ""
+    client_msg_id = None
     try:
-        await bot.send_photo(
+        sent_user_msg = await bot.send_photo(
             chat_id=user["user_id"],
             photo=photo_file_id,
             caption=final_caption,
             parse_mode="HTML"
         )
         user_sent = True
+        client_msg_id = sent_user_msg.message_id
     except Exception as e:
         logger.error(f"Foydalanuvchiga ({user.get('user_id')}) foto-otchyot yuborishda xatolik: {e}")
         user_err = str(e)
@@ -1214,16 +1324,20 @@ async def callback_confirm_report(query: CallbackQuery, state: FSMContext, bot: 
     channel_id = await get_report_channel_id()
     channel_sent = False
     channel_err = ""
+    channel_msg_id = None
+    channel_chat_str = None
     if channel_id:
         try:
             target_ch = int(channel_id) if channel_id.startswith("-") and channel_id[1:].isdigit() else channel_id
-            await bot.send_photo(
+            sent_ch_msg = await bot.send_photo(
                 chat_id=target_ch,
                 photo=photo_file_id,
                 caption=final_caption,
                 parse_mode="HTML"
             )
             channel_sent = True
+            channel_msg_id = sent_ch_msg.message_id
+            channel_chat_str = str(target_ch)
         except Exception as e:
             logger.error(f"Kanalga ({channel_id}) foto-otchyot yuborishda xatolik: {e}")
             channel_err = str(e)
@@ -1241,7 +1355,10 @@ async def callback_confirm_report(query: CallbackQuery, state: FSMContext, bot: 
         "price_usd": price_usd,
         "price_uzs": price_uzs,
         "photo_file_id": photo_file_id,
-        "created_at": now_str
+        "created_at": now_str,
+        "client_msg_id": client_msg_id,
+        "channel_msg_id": channel_msg_id,
+        "channel_chat_id": channel_chat_str
     })
 
     # 4. Save to Google Sheets "Yuklar" tab
