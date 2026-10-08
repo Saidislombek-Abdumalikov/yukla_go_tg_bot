@@ -1,0 +1,16 @@
+# Environment & Secret files
+.env
+credentials.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+venv/
+env/
+
+# Database & logs
+*.db
+*.db-wal
+*.db-shm
+*.log
