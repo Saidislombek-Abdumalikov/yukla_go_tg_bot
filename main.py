@@ -42,7 +42,8 @@ async def setup_bot_commands(bot: Bot):
                     BotCommand(command="users", description="👥 Mijozlar ro'yxati"),
                     BotCommand(command="kurs", description="💵 Dollar kursini sozlash"),
                     BotCommand(command="stat", description="📊 Bot statistikasi"),
-                    BotCommand(command="sync_sheets", description="📑 Google Sheets sinxronlash")
+                    BotCommand(command="sync_sheets", description="📑 Google Sheets sinxronlash"),
+                    BotCommand(command="backup", description="💾 Bazani yuklab olish (Backup)")
                 ],
                 scope=BotCommandScopeChat(chat_id=admin_id)
             )
@@ -76,13 +77,14 @@ async def main():
     await init_db()
     logger.info("SQLite ma'lumotlar bazasi tayyor.")
 
-    # Render qayta ishga tushganda ma'lumotlar yo'qolmasligi uchun Google Sheetsdan sinxronlash
+    # Render qayta ishga tushganda ma'lumotlar yo'qolmasligi uchun Google Sheetsdan to'liq sinxronlash
     try:
         from sheets import sheet_manager
         if sheet_manager.is_configured():
-            imported_count = await sheet_manager.import_all_users_to_db()
-            if imported_count > 0:
-                logger.info(f"Google Sheetsdan {imported_count} ta yangi mijoz bazaga yuklandi.")
+            u_count = await sheet_manager.import_all_users_to_db()
+            c_count = await sheet_manager.import_all_cargos_to_db()
+            if u_count > 0 or c_count > 0:
+                logger.info(f"Google Sheetsdan {u_count} ta mijoz va {c_count} ta yuk hisoboti bazaga yuklandi.")
     except Exception as e:
         logger.warning(f"Google Sheets avtomatik import xatosi: {e}")
 

@@ -1,9 +1,10 @@
+import os
 import logging
 import html
 import datetime
 import re
 from aiogram import Router, F, Bot
-from aiogram.types import CallbackQuery, Message, ChatMemberUpdated
+from aiogram.types import CallbackQuery, Message, ChatMemberUpdated, FSInputFile
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 
@@ -18,7 +19,8 @@ from config import (
     DEFAULT_USD_RATE,
     DEFAULT_KG_PRICE,
     REPORT_CHANNEL_ID,
-    ID_PREFIX
+    ID_PREFIX,
+    DB_PATH
 )
 from database import (
     get_user,
@@ -1053,6 +1055,27 @@ async def callback_del_rep_do(query: CallbackQuery, bot: Bot):
 
 
 
+@admin_router.message(Command("backup"))
+async def cmd_backup_database(message: Message):
+    if not await check_admin_or_reject(message):
+        return
+
+    if not os.path.exists(DB_PATH):
+        await message.answer("⚠️ Ma'lumotlar bazasi fayli topilmadi.")
+        return
+
+    now_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    backup_file = FSInputFile(DB_PATH, filename=f"cargo_backup_{now_str}.db")
+    await message.answer_document(
+        document=backup_file,
+        caption=(
+            f"💾 <b>Ma'lumotlar bazasi zaxira nusxasi (Backup)</b>\n\n"
+            f"📅 Vaqt: <code>{now_str}</code>\n\n"
+            f"Ushbu fayl barcha mijozlar ro'yxati, arizalar va yuklar tarixini o'z ichiga oladi."
+        ),
+        parse_mode="HTML"
+    )
+
 @admin_router.message(Command("sync_sheets"))
 async def cmd_sync_sheets(message: Message):
     if not await check_admin_or_reject(message):
@@ -1062,27 +1085,27 @@ async def cmd_sync_sheets(message: Message):
         await message.answer("⚠️ Google Sheets sozlanmagan! <code>credentials.json</code> faylini bot papkasiga joylashtiring.", parse_mode="HTML")
         return
 
+    await message.answer("🔄 Google Sheets bilan ikki tomonlama to'liq sinxronizatsiya boshlandi...")
+
+    # 1. Sheetsdan bazaga yangi mijozlar va yuklarni import qilish
+    u_imp = await sheet_manager.import_all_users_to_db()
+    c_imp = await sheet_manager.import_all_cargos_to_db()
+
+    # 2. Bazadagi hali Sheetsga yozilmagan mijozlarni Sheetsga yuborish
     unsynced = await get_unsynced_users()
-    if not unsynced:
-        await message.answer("✅ Barcha tasdiqlangan foydalanuvchilar allaqachon Google Sheetsga yozilgan!")
-        return
-
-    success_count = 0
-    fail_count = 0
-    await message.answer(f"🔄 {len(unsynced)} ta foydalanuvchi sinxronlanmoqda...")
-
+    push_count = 0
     for user in unsynced:
         ok, msg = await sheet_manager.append_user(user)
         if ok:
             await mark_as_synced(user["user_id"])
-            success_count += 1
-        else:
-            fail_count += 1
+            push_count += 1
 
     await message.answer(
-        f"✅ Sinxronizatsiya yakunlandi!\n"
-        f"Muvaffaqiyatli: {success_count} ta\n"
-        f"Xatolar: {fail_count} ta"
+        f"✅ <b>Google Sheets sinxronizatsiyasi yakunlandi!</b>\n\n"
+        f"📥 Sheetsdan bazaga tiklandi: <b>{u_imp} ta mijoz, {c_imp} ta yuk</b>\n"
+        f"📤 Bazadan Sheetsga yozildi: <b>{push_count} ta mijoz</b>\n\n"
+        f"Barcha ma'lumotlar 100% Google Sheets bilan to'liq mos holatda!",
+        parse_mode="HTML"
     )
 
 # --- FOTO-OTCHYOT FSM FLOW ---

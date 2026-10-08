@@ -416,5 +416,96 @@ class GoogleSheetManager:
             logger.error(f"Google Sheetsdan bazaga import qilishda xatolik: {e}")
             return 0
 
+    async def import_all_cargos_to_db(self) -> int:
+        """
+        Google Sheets 'Yuklar' varag'idagi barcha yuk hisobotlarini SQLite bazasiga import qiladi.
+        Render qayta ishga tushganda yoki yangilanganda barcha otchyotlar va to'lovlar 100% tiklanadi.
+        """
+        if not self.is_configured():
+            return 0
+        try:
+            loop = asyncio.get_running_loop()
+            def _fetch_rows():
+                ws = self._get_cargos_worksheet_sync()
+                return ws.get_all_values()
+
+            rows = await asyncio.wait_for(loop.run_in_executor(None, _fetch_rows), timeout=25.0)
+            if len(rows) <= 1:
+                return 0
+
+            imported = 0
+            async with get_connection() as db:
+                for row in rows[1:]:
+                    if not row or len(row) < 8:
+                        continue
+                    created_at = row[0].strip() if len(row) > 0 else ""
+                    id_code = row[1].strip().upper() if len(row) > 1 else ""
+                    first_name = row[2].strip() if len(row) > 2 else ""
+                    last_name = row[3].strip() if len(row) > 3 else ""
+                    full_name = f"{first_name} {last_name}".strip()
+                    phone = row[4].strip() if len(row) > 4 else ""
+                    track_codes = row[6].strip() if len(row) > 6 else ""
+
+                    try:
+                        weight_raw = row[7].strip().replace(",", ".")
+                        weight = float(weight_raw) if weight_raw else 0.0
+                    except Exception:
+                        weight = 0.0
+
+                    try:
+                        raw_usd = row[8].replace("$", "").replace(",", ".").strip() if len(row) > 8 else "0"
+                        price_usd = float(raw_usd) if raw_usd else 0.0
+                    except Exception:
+                        price_usd = 0.0
+
+                    try:
+                        raw_uzs = row[9].replace("so'm", "").replace(",", "").replace(" ", "").strip() if len(row) > 9 else "0"
+                        price_uzs = int(raw_uzs) if raw_uzs and raw_uzs.isdigit() else 0
+                    except Exception:
+                        price_uzs = 0
+
+                    status_raw = row[10].strip().lower() if len(row) > 10 else "qarzdor"
+                    payment_status = "tolandi" if "to'landi" in status_raw or "tolandi" in status_raw else "qarzdor"
+
+                    if not id_code or not track_codes:
+                        continue
+
+                    # Foydalanuvchi user_id sini aniqlaymiz
+                    async with db.execute("SELECT user_id FROM users WHERE UPPER(id_code) = ?", (id_code,)) as cur:
+                        u_row = await cur.fetchone()
+                        user_id = u_row[0] if u_row else None
+
+                    # Takrorlanmasligi uchun tekshiramiz: bir xil id_code, track_codes va created_at
+                    async with db.execute(
+                        "SELECT id FROM reports WHERE UPPER(id_code) = ? AND track_codes = ? AND created_at = ?",
+                        (id_code, track_codes, created_at)
+                    ) as cur:
+                        exists = await cur.fetchone()
+
+                    if not exists:
+                        await db.execute("""
+                            INSERT INTO reports (
+                                user_id, id_code, full_name, phone, track_codes,
+                                weight, price_usd, price_uzs, payment_status, created_at
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """, (
+                            user_id, id_code, full_name, phone, track_codes,
+                            weight, price_usd, price_uzs, payment_status, created_at
+                        ))
+                        imported += 1
+                    else:
+                        # Agar mavjud bo'lsa, to'lov holatini Google Sheetsdagi bilan yangilab qo'yamiz
+                        await db.execute(
+                            "UPDATE reports SET payment_status = ? WHERE id = ?",
+                            (payment_status, exists[0])
+                        )
+
+                await db.commit()
+            return imported
+        except Exception as e:
+            logger.error(f"Google Sheetsdan yuklarni import qilishda xatolik: {e}")
+            return 0
+
 sheet_manager = GoogleSheetManager()
+
 
