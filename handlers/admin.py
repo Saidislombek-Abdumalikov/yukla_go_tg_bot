@@ -237,10 +237,6 @@ async def cmd_admin_stats(message: Message):
         return
 
     stats = await get_stats()
-    sheets_ok = "✅ Sozlangan" if sheet_manager.is_configured() else "⚠️ Sozlanmagan (credentials.json yo'q)"
-    ch_id = await get_report_channel_id()
-    ch_title = await get_setting("report_channel_title", "Ulanmagan")
-    channel_status = f"✅ {ch_title} (<code>{ch_id}</code>)" if ch_id else "⚠️ Ulanmagan"
     rate = await get_current_usd_rate()
 
     text = (
@@ -249,9 +245,7 @@ async def cmd_admin_stats(message: Message):
         f"✅ Tasdiqlangan mijozlar: <b>{stats['approved']}</b>\n"
         f"⏳ Ko'rib chiqilmoqda (Pending): <b>{stats['pending']}</b>\n"
         f"❌ Rad etilganlar: <b>{stats['rejected']}</b>\n\n"
-        f"💵 Dollar kursi: <b>{rate:,} so'm</b>\n"
-        f"📢 Hisobot kanali: {channel_status}\n"
-        f"📑 Google Sheets: {sheets_ok}\n\n"
+        f"💵 Hozirgi dollar kursi: <b>{rate:,} so'm</b>\n\n"
         f"Tezkor buyruqlar:\n"
         f"• <code>/tolandi YK1 YK2</code> — To'lovni tasdiqlash\n"
         f"• <code>/report</code> — Foto-otchyot yaratish\n"
@@ -268,10 +262,6 @@ async def callback_admin_panel(query: CallbackQuery):
     await query.answer()
 
     stats = await get_stats()
-    sheets_ok = "✅ Sozlangan" if sheet_manager.is_configured() else "⚠️ Sozlanmagan (credentials.json yo'q)"
-    ch_id = await get_report_channel_id()
-    ch_title = await get_setting("report_channel_title", "Ulanmagan")
-    channel_status = f"✅ {ch_title} (<code>{ch_id}</code>)" if ch_id else "⚠️ Ulanmagan"
     rate = await get_current_usd_rate()
 
     text = (
@@ -280,9 +270,7 @@ async def callback_admin_panel(query: CallbackQuery):
         f"✅ Tasdiqlangan mijozlar: <b>{stats['approved']}</b>\n"
         f"⏳ Ko'rib chiqilmoqda (Pending): <b>{stats['pending']}</b>\n"
         f"❌ Rad etilganlar: <b>{stats['rejected']}</b>\n\n"
-        f"💵 Dollar kursi: <b>{rate:,} so'm</b>\n"
-        f"📢 Hisobot kanali: {channel_status}\n"
-        f"📑 Google Sheets: {sheets_ok}\n\n"
+        f"💵 Hozirgi dollar kursi: <b>{rate:,} so'm</b>\n\n"
         f"Tezkor buyruqlar:\n"
         f"• <code>/tolandi YK1 YK2</code> — To'lovni tasdiqlash\n"
         f"• <code>/report</code> — Foto-otchyot yaratish\n"
@@ -358,38 +346,61 @@ async def cmd_mark_paid(message: Message, bot: Bot):
         return
 
     # 1. Google Sheetsda 'To'landi' deb yangilash
-    updated_count, updated_codes = await sheet_manager.mark_cargos_paid(id_codes)
+    sheet_updated_count, sheet_updated_codes = await sheet_manager.mark_cargos_paid(id_codes)
 
     # 2. SQLite bazada tolandi deb belgilash
-    await mark_reports_paid(id_codes)
+    db_updated_count, db_updated_codes = await mark_reports_paid(id_codes)
 
-    # 3. Har bir mijozga Telegramda xabar yetkazish
+    # Haqiqatan ham qarzdor yuk bo'lgan va to'langan ID lar to'plami
+    actually_paid_set = {str(c).upper().strip() for c in (sheet_updated_codes + db_updated_codes)}
+
     notified_list = []
-    for code in id_codes:
-        user = await get_user_by_id_code(code)
-        if user:
-            first_name_esc = html.escape(user.get("first_name", ""))
-            try:
-                await bot.send_message(
-                    chat_id=user["user_id"],
-                    text=(
-                        f"✅ <b>Hurmatli {first_name_esc}, to'lovingiz qabul qilindi!</b>\n\n"
-                        f"Yukingiz uchun to'lov to'liq tasdiqlandi. "
-                        f"Hamkorligingiz uchun rahmat! 😊"
-                    ),
-                    parse_mode="HTML"
-                )
-                notified_list.append(f"• <b>{code}</b> ({first_name_esc}) — ✅ Xabar bordi")
-            except Exception:
-                notified_list.append(f"• <b>{code}</b> ({first_name_esc}) — ⚠️ Xabar yetmadi (bot bloklangan)")
-        else:
-            notified_list.append(f"• <b>{code}</b> — ⚠️ Bazada topilmadi")
+    success_count = 0
 
-    summary = (
-        f"🟢 <b>TO'LOV TASDIQLANDI!</b>\n\n"
-        f"📊 Google Sheetsda <b>{updated_count} ta</b> yuk qatori <b>'To'landi'</b> deb yangilandi.\n\n"
-        f"<b>Mijozlar natijasi:</b>\n" + "\n".join(notified_list)
-    )
+    for code in id_codes:
+        clean_code = str(code).upper().strip()
+        user = await get_user_by_id_code(clean_code)
+        first_name_esc = html.escape(user.get("first_name", "")) if user else ""
+
+        if clean_code in actually_paid_set:
+            # Haqiqatan ham qarzdor yuk bo'lgan va to'landi deb belgilandi!
+            if user:
+                try:
+                    await bot.send_message(
+                        chat_id=user["user_id"],
+                        text=(
+                            f"✅ <b>Hurmatli {first_name_esc}, to'lovingiz qabul qilindi!</b>\n\n"
+                            f"Yukingiz uchun to'lov to'liq tasdiqlandi. "
+                            f"Hamkorligingiz uchun rahmat! 😊"
+                        ),
+                        parse_mode="HTML"
+                    )
+                    notified_list.append(f"• <b>{code}</b> ({first_name_esc}) — ✅ To'landi (Mijozga xabar bordi)")
+                except Exception:
+                    notified_list.append(f"• <b>{code}</b> ({first_name_esc}) — ✅ To'landi (Mijoz botni bloklagan)")
+            else:
+                notified_list.append(f"• <b>{code}</b> — ✅ To'landi (Lekin mijoz bazada topilmadi)")
+            success_count += 1
+        else:
+            # Bu mijoz bo'yicha qarzdor yuk bo'lmagan (allaqachon to'langan yoki yuk kiritilmagan)
+            if user:
+                notified_list.append(f"• <b>{code}</b> ({first_name_esc}) — ℹ️ Qarzdor yuk yo'q (allaqachon to'langan)")
+            else:
+                notified_list.append(f"• <b>{code}</b> — ⚠️ Bazada bunday mijoz topilmadi")
+
+    if success_count > 0:
+        summary = (
+            f"🟢 <b>TO'LOV TASDIQLANDI!</b>\n\n"
+            f"📊 Google Sheets va bazada <b>{max(sheet_updated_count, db_updated_count)} ta</b> yuk holati <b>'To'landi'</b> deb yangilandi.\n\n"
+            f"<b>Mijozlar natijasi:</b>\n" + "\n".join(notified_list)
+        )
+    else:
+        summary = (
+            f"ℹ️ <b>QARZDOR YUK TOPILMADI</b>\n\n"
+            f"Kiritilgan mijoz(lar)da to'lanmagan qarzdor yuk topilmadi.\n"
+            f"<i>Mijozlarga hech qanday xabar yuborilmadi.</i>\n\n"
+            f"<b>Holat:</b>\n" + "\n".join(notified_list)
+        )
     await message.answer(summary, parse_mode="HTML")
 
 # --- Telegram Channel Connection & Auto-detection ---
@@ -463,24 +474,6 @@ async def cmd_set_channel(message: Message, bot: Bot):
         else:
             await message.answer(f"⚠️ Xatolik: {e}\nIltimos, kanaldan bitta xabarni botga forward qiling.")
 
-@admin_router.callback_query(F.data == "admin_action_channel")
-async def callback_admin_channel(query: CallbackQuery):
-    if not await check_admin_or_reject(query):
-        return
-    await query.answer()
-
-    curr_id = await get_report_channel_id()
-    curr_title = await get_setting("report_channel_title", "Noma'lum")
-    text = (
-        f"📢 <b>Telegram Kanal Sozlamalari</b>\n\n"
-        f"Ulangan kanal: <b>{curr_title if curr_id else 'Ulanmagan'}</b>\n"
-        f"Kanal ID: <code>{curr_id or 'Mavjud emas'}</code>\n\n"
-        f"<b>Qanday ulash mumkin?</b>\n"
-        f"1. Botni kanalingizga qo'shib, <b>Admin</b> huquqini bering.\n"
-        f"2. Kanaldan istalgan xabarni botga <b>forward</b> qiling (yoki kanalda bitta post yozing).\n"
-        f"Bot kanalni avtomatik aniqlaydi va eslab qoladi!"
-    )
-    await query.message.answer(text, parse_mode="HTML")
 
 # --- Users List & Pagination ---
 @admin_router.message(Command("users"))

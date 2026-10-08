@@ -86,10 +86,7 @@ def admin_panel_keyboard() -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(text="👥 Mijozlar ro'yxati", callback_data="admin_action_users_1"),
-                InlineKeyboardButton(text="📊 Statistika", callback_data="admin_action_stats")
-            ],
-            [
-                InlineKeyboardButton(text="📢 Kanal sozlamasi", callback_data="admin_action_channel")
+                InlineKeyboardButton(text="📊 Yangilash", callback_data="admin_action_stats")
             ]
         ]
     )

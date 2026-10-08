@@ -325,18 +325,30 @@ async def save_report(report_data: dict) -> int:
         await db.commit()
         return cursor.lastrowid
 
-async def mark_reports_paid(id_codes: list) -> int:
+async def mark_reports_paid(id_codes: list) -> tuple:
     if not id_codes:
-        return 0
+        return 0, []
+    clean_codes = [c.upper().strip() for c in id_codes]
     async with get_connection() as db:
-        placeholders = ",".join("?" for _ in id_codes)
+        placeholders = ",".join("?" for _ in clean_codes)
+        async with db.execute(f"""
+            SELECT DISTINCT id_code FROM reports
+            WHERE UPPER(id_code) IN ({placeholders}) AND payment_status != 'tolandi'
+        """, clean_codes) as cursor:
+            rows = await cursor.fetchall()
+            unpaid_codes = [r[0] for r in rows]
+
+        if not unpaid_codes:
+            return 0, []
+
+        p2 = ",".join("?" for _ in unpaid_codes)
         cursor = await db.execute(f"""
             UPDATE reports
             SET payment_status = 'tolandi'
-            WHERE id_code IN ({placeholders}) AND payment_status != 'tolandi'
-        """, id_codes)
+            WHERE UPPER(id_code) IN ({p2}) AND payment_status != 'tolandi'
+        """, [c.upper() for c in unpaid_codes])
         await db.commit()
-        return cursor.rowcount
+        return cursor.rowcount, unpaid_codes
 
 async def get_user_reports(id_code: str) -> list:
     async with get_connection() as db:
