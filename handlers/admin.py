@@ -34,7 +34,12 @@ from database import (
     count_approved_users,
     search_approved_users,
     save_report,
-    mark_reports_paid
+    mark_reports_paid,
+    get_user_reports,
+    get_report_by_id,
+    update_report_weight,
+    update_report_track_codes,
+    delete_report
 )
 from sheets import sheet_manager
 from keyboards import (
@@ -44,9 +49,13 @@ from keyboards import (
     cancel_fsm_keyboard,
     report_confirm_keyboard,
     user_card_actions_keyboard,
-    users_pagination_keyboard
+    users_pagination_keyboard,
+    user_reports_list_keyboard,
+    report_manage_keyboard,
+    report_delete_confirm_keyboard,
+    cancel_edit_report_keyboard
 )
-from states import ReportStates
+from states import ReportStates, EditReportStates
 
 logger = logging.getLogger(__name__)
 admin_router = Router()
@@ -604,6 +613,326 @@ async def cmd_view_user(message: Message, bot: Bot):
         parse_mode="HTML",
         reply_markup=user_card_actions_keyboard(user["user_id"])
     )
+
+# --- USER CARGOS & REPORT MANAGEMENT (VIEW / EDIT / DELETE) ---
+@admin_router.callback_query(F.data.startswith("user_cargos_"))
+async def callback_user_cargos(query: CallbackQuery, bot: Bot):
+    if not await check_admin_or_reject(query):
+        return
+    await query.answer()
+
+    user_id = int(query.data.split("_")[2])
+    user = await get_user(user_id)
+    if not user:
+        await query.message.answer("❌ Mijoz topilmadi.")
+        return
+
+    id_code = user.get("id_code", "")
+    reports = await get_user_reports(id_code)
+
+    first_name_esc = html.escape(user.get("first_name") or "")
+    if not reports:
+        await query.message.answer(
+            f"📦 <b>{id_code} — {first_name_esc}</b> uchun hozircha yuborilgan yuk hisobotlari mavjud emas.",
+            parse_mode="HTML",
+            reply_markup=user_card_actions_keyboard(user_id)
+        )
+        return
+
+    text = (
+        f"📦 <b>{id_code} — {first_name_esc}</b> yuklar tarixi:\n"
+        f"Jami yuborilgan foto-otchyotlar: <b>{len(reports)} ta</b>\n\n"
+        f"<i>Tahrirlash yoki o'chirish uchun hisobotni tanlang:</i>"
+    )
+    await query.message.answer(
+        text,
+        parse_mode="HTML",
+        reply_markup=user_reports_list_keyboard(reports, user_id)
+    )
+
+@admin_router.callback_query(F.data.startswith("view_report_"))
+async def callback_view_single_report(query: CallbackQuery, bot: Bot, state: FSMContext):
+    if not await check_admin_or_reject(query):
+        return
+    await query.answer()
+    await state.clear()
+
+    parts = query.data.split("_")
+    report_id = int(parts[2])
+    user_id = int(parts[3])
+
+    report = await get_report_by_id(report_id)
+    if not report:
+        await query.message.answer("❌ Ushbu hisobot topilmadi (o'chirilgan bo'lishi mumkin).")
+        return
+
+    id_code = report.get("id_code", "")
+    full_name_esc = html.escape(report.get("full_name") or "")
+    phone_esc = html.escape(report.get("phone") or "")
+    track_esc = html.escape(report.get("track_codes") or "")
+    weight = report.get("weight", 0.0)
+    price_usd = report.get("price_usd", 0.0)
+    price_uzs = report.get("price_uzs", 0)
+    payment_status = report.get("payment_status", "qarzdor")
+    status_text = "🟢 To'langan" if payment_status == "tolandi" else "🔴 Qarzdor (To'lanmagan)"
+    created_at = report.get("created_at", "")
+
+    text = (
+        f"📦 <b>Yuk Hisoboti (#{report_id}):</b>\n\n"
+        f"🆔 Mijoz: <b>{id_code}</b> ({full_name_esc})\n"
+        f"📱 Telefon: {phone_esc}\n"
+        f"📅 Sana: {created_at}\n"
+        f"🔖 Trek-kodlar:\n<code>{track_esc}</code>\n\n"
+        f"⚖️ Og'irlik: <b>{weight} kg</b>\n"
+        f"💵 Narx ($): <b>${price_usd}</b>\n"
+        f"🇺🇿 Narx (so'm): <b>{price_uzs:,} so'm</b>\n"
+        f"💳 To'lov holati: <b>{status_text}</b>"
+    )
+
+    photo_file_id = report.get("photo_file_id")
+    if photo_file_id:
+        try:
+            await query.message.answer_photo(
+                photo=photo_file_id,
+                caption=text,
+                parse_mode="HTML",
+                reply_markup=report_manage_keyboard(report_id, user_id)
+            )
+            return
+        except Exception:
+            pass
+
+    await query.message.answer(
+        text,
+        parse_mode="HTML",
+        reply_markup=report_manage_keyboard(report_id, user_id)
+    )
+
+@admin_router.callback_query(F.data.startswith("edit_rep_weight_"))
+async def callback_edit_rep_weight(query: CallbackQuery, state: FSMContext):
+    if not await check_admin_or_reject(query):
+        return
+    await query.answer()
+
+    parts = query.data.split("_")
+    report_id = int(parts[3])
+    user_id = int(parts[4])
+
+    report = await get_report_by_id(report_id)
+    if not report:
+        await query.message.answer("❌ Hisobot topilmadi.")
+        return
+
+    await state.set_state(EditReportStates.entering_new_weight)
+    await state.update_data(
+        report_id=report_id,
+        user_id=user_id,
+        id_code=report.get("id_code", ""),
+        track_codes=report.get("track_codes", ""),
+        old_weight=report.get("weight", 0.0)
+    )
+
+    await query.message.answer(
+        f"⚖️ <b>Og'irlikni o'zgartirish (#{report_id}):</b>\n\n"
+        f"Hozirgi og'irlik: <b>{report.get('weight')} kg</b>\n\n"
+        f"Iltimos, yangi og'irlikni (kg) kiriting (masalan: <code>3.5</code>):",
+        parse_mode="HTML",
+        reply_markup=cancel_edit_report_keyboard(report_id, user_id)
+    )
+
+@admin_router.message(EditReportStates.entering_new_weight, F.text)
+async def state_save_new_weight(message: Message, state: FSMContext):
+    if not await check_admin_or_reject(message):
+        return
+
+    val = message.text.strip().replace(",", ".")
+    try:
+        new_weight = float(val)
+        if new_weight <= 0 or new_weight > 5000:
+            raise ValueError()
+        new_weight = round(new_weight, 2)
+    except ValueError:
+        await message.answer(
+            "⚠️ Noto'g'ri qiymat! Iltimos, og'irlikni to'g'ri musbat sonda kiriting (masalan: <code>3.5</code>):",
+            parse_mode="HTML"
+        )
+        return
+
+    data = await state.get_data()
+    report_id = data.get("report_id")
+    user_id = data.get("user_id")
+    id_code = data.get("id_code")
+    track_codes = data.get("track_codes")
+
+    rate = await get_current_usd_rate()
+    price_usd = round(new_weight * DEFAULT_KG_PRICE, 2)
+    price_uzs = int(round(price_usd * rate))
+
+    # 1. Bazada yangilash
+    await update_report_weight(report_id, new_weight, price_usd, price_uzs)
+
+    # 2. Google Sheetsda yangilash
+    await sheet_manager.update_cargo_report(
+        id_code=id_code,
+        old_track_codes=track_codes,
+        new_weight=new_weight,
+        new_price_usd=price_usd,
+        new_price_uzs=price_uzs
+    )
+
+    await state.clear()
+    await message.answer(
+        f"✅ <b>Og'irlik va narx muvaffaqiyatli yangilandi!</b>\n\n"
+        f"⚖️ Yangi og'irlik: <b>{new_weight} kg</b>\n"
+        f"💵 Narx ($): <b>${price_usd}</b>\n"
+        f"🇺🇿 Narx (so'm): <b>{price_uzs:,} so'm</b>\n\n"
+        f"<i>Google Sheets va ma'lumotlar bazasida yangilandi.</i>",
+        parse_mode="HTML",
+        reply_markup=report_manage_keyboard(report_id, user_id)
+    )
+
+@admin_router.callback_query(F.data.startswith("edit_rep_tracks_"))
+async def callback_edit_rep_tracks(query: CallbackQuery, state: FSMContext):
+    if not await check_admin_or_reject(query):
+        return
+    await query.answer()
+
+    parts = query.data.split("_")
+    report_id = int(parts[3])
+    user_id = int(parts[4])
+
+    report = await get_report_by_id(report_id)
+    if not report:
+        await query.message.answer("❌ Hisobot topilmadi.")
+        return
+
+    await state.set_state(EditReportStates.entering_new_tracks)
+    await state.update_data(
+        report_id=report_id,
+        user_id=user_id,
+        id_code=report.get("id_code", ""),
+        old_tracks=report.get("track_codes", "")
+    )
+
+    await query.message.answer(
+        f"🔖 <b>Trek-kodlarni tahrirlash (#{report_id}):</b>\n\n"
+        f"Hozirgi trek-kodlar:\n<code>{html.escape(report.get('track_codes', ''))}</code>\n\n"
+        f"Iltimos, yangi trek-kod(lar)ni kiriting (bir nechta bo'lsa probel yoki vergul bilan):",
+        parse_mode="HTML",
+        reply_markup=cancel_edit_report_keyboard(report_id, user_id)
+    )
+
+@admin_router.message(EditReportStates.entering_new_tracks, F.text)
+async def state_save_new_tracks(message: Message, state: FSMContext):
+    if not await check_admin_or_reject(message):
+        return
+
+    raw_text = message.text.strip()
+    raw_tokens = re.split(r'[\s,\n]+', raw_text)
+    tracks = [t.strip().upper() for t in raw_tokens if t.strip()]
+    if not tracks:
+        await message.answer("⚠️ Iltimos, kamida bitta trek-kod kiriting:")
+        return
+
+    new_track_codes = ", ".join(tracks)
+    data = await state.get_data()
+    report_id = data.get("report_id")
+    user_id = data.get("user_id")
+    id_code = data.get("id_code")
+    old_tracks = data.get("old_tracks")
+
+    # 1. Bazada yangilash
+    await update_report_track_codes(report_id, new_track_codes)
+
+    # 2. Google Sheetsda yangilash
+    await sheet_manager.update_cargo_report(
+        id_code=id_code,
+        old_track_codes=old_tracks,
+        new_track_codes=new_track_codes
+    )
+
+    await state.clear()
+    await message.answer(
+        f"✅ <b>Trek-kod(lar) muvaffaqiyatli yangilandi!</b>\n\n"
+        f"🔖 Yangi trek-kodlar:\n<code>{html.escape(new_track_codes)}</code>\n\n"
+        f"<i>Google Sheets va ma'lumotlar bazasida yangilandi.</i>",
+        parse_mode="HTML",
+        reply_markup=report_manage_keyboard(report_id, user_id)
+    )
+
+@admin_router.callback_query(F.data.startswith("del_rep_confirm_"))
+async def callback_del_rep_confirm(query: CallbackQuery):
+    if not await check_admin_or_reject(query):
+        return
+    await query.answer()
+
+    parts = query.data.split("_")
+    report_id = int(parts[3])
+    user_id = int(parts[4])
+
+    report = await get_report_by_id(report_id)
+    if not report:
+        await query.message.answer("❌ Hisobot topilmadi.")
+        return
+
+    await query.message.answer(
+        f"⚠️ <b>Diqqat!</b>\n\n"
+        f"Haqiqatan ham #{report_id} raqamli yuk hisobotini (Mijoz: <b>{report.get('id_code')}</b>, {report.get('weight')} kg) o'chirmoqchimisiz?\n\n"
+        f"Bu amal hisobotni <b>bazadan va Google Sheetsdan butunlay o'chirib tashlaydi</b>.",
+        parse_mode="HTML",
+        reply_markup=report_delete_confirm_keyboard(report_id, user_id)
+    )
+
+@admin_router.callback_query(F.data.startswith("del_rep_do_"))
+async def callback_del_rep_do(query: CallbackQuery, bot: Bot):
+    if not await check_admin_or_reject(query):
+        return
+    await query.answer()
+
+    parts = query.data.split("_")
+    report_id = int(parts[3])
+    user_id = int(parts[4])
+
+    report = await get_report_by_id(report_id)
+    if not report:
+        await query.message.answer("❌ Hisobot allaqachon o'chirilgan.")
+        return
+
+    id_code = report.get("id_code", "")
+    track_codes = report.get("track_codes", "")
+
+    # 1. Bazadan o'chirish
+    await delete_report(report_id)
+
+    # 2. Google Sheetsdan o'chirish
+    await sheet_manager.delete_cargo_report(id_code, track_codes)
+
+    await query.message.answer(
+        f"🗑 <b>#{report_id} hisoboti muvaffaqiyatli o'chirildi!</b>\n"
+        f"Baza va Google Sheetsdan olib tashlandi.",
+        parse_mode="HTML"
+    )
+
+    # Foydalanuvchi yuklari ro'yxatini qayta ko'rsatamiz
+    user = await get_user(user_id)
+    if user:
+        reports = await get_user_reports(id_code)
+        first_name_esc = html.escape(user.get("first_name") or "")
+        if not reports:
+            await query.message.answer(
+                f"📦 <b>{id_code} — {first_name_esc}</b> uchun yuborilgan boshqa yuklar qolmadi.",
+                parse_mode="HTML",
+                reply_markup=user_card_actions_keyboard(user_id)
+            )
+        else:
+            await query.message.answer(
+                f"📦 <b>{id_code} — {first_name_esc}</b> yuklar tarixi:\n"
+                f"Qolgan hisobotlar: <b>{len(reports)} ta</b>",
+                parse_mode="HTML",
+                reply_markup=user_reports_list_keyboard(reports, user_id)
+            )
+
+
 
 @admin_router.message(Command("sync_sheets"))
 async def cmd_sync_sheets(message: Message):

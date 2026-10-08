@@ -250,6 +250,114 @@ class GoogleSheetManager:
                 self._gc = None
                 return 0, []
 
+    async def update_cargo_report(
+        self,
+        id_code: str,
+        old_track_codes: str,
+        new_track_codes: str = None,
+        new_weight: float = None,
+        new_price_usd: float = None,
+        new_price_uzs: int = None
+    ) -> Tuple[bool, str]:
+        """
+        Updates weight/prices or track_codes of a cargo row in 'Yuklar' worksheet.
+        """
+        if not self.is_configured():
+            return False, "Google credentials mavjud emas."
+        async with self._lock:
+            try:
+                loop = asyncio.get_running_loop()
+                def _do_update():
+                    ws = self._get_cargos_worksheet_sync()
+                    all_rows = ws.get_all_values()
+                    if len(all_rows) < 2:
+                        return False, "Jadval bo'sh"
+
+                    id_clean = id_code.upper().strip()
+                    target_row_idx = None
+
+                    for r_idx in range(len(all_rows) - 1, 0, -1):
+                        row = all_rows[r_idx]
+                        if len(row) > 6:
+                            row_id = str(row[1]).upper().strip()
+                            row_tracks = str(row[6]).strip()
+                            if row_id == id_clean and (old_track_codes.strip() in row_tracks or row_tracks in old_track_codes.strip()):
+                                target_row_idx = r_idx + 1
+                                break
+
+                    if not target_row_idx:
+                        for r_idx in range(len(all_rows) - 1, 0, -1):
+                            row = all_rows[r_idx]
+                            if len(row) > 1 and str(row[1]).upper().strip() == id_clean:
+                                target_row_idx = r_idx + 1
+                                break
+
+                    if not target_row_idx:
+                        return False, "Qator topilmadi"
+
+                    if new_track_codes is not None:
+                        ws.update_cell(target_row_idx, 7, new_track_codes)
+                    if new_weight is not None:
+                        ws.update_cell(target_row_idx, 8, str(new_weight))
+                        ws.update_cell(target_row_idx, 9, f"{new_price_usd}$")
+                        ws.update_cell(target_row_idx, 10, f"{new_price_uzs:,} so'm")
+
+                    return True, "Yangilandi"
+
+                res, msg = await asyncio.wait_for(loop.run_in_executor(None, _do_update), timeout=25.0)
+                return res, msg
+            except Exception as e:
+                logger.error(f"Google Sheetsda yukni tahrirlashda xatolik: {e}")
+                self._gc = None
+                return False, str(e)
+
+    async def delete_cargo_report(self, id_code: str, track_codes: str) -> Tuple[bool, str]:
+        """
+        Deletes matching cargo row from 'Yuklar' worksheet.
+        """
+        if not self.is_configured():
+            return False, "Google credentials mavjud emas."
+        async with self._lock:
+            try:
+                loop = asyncio.get_running_loop()
+                def _do_delete():
+                    ws = self._get_cargos_worksheet_sync()
+                    all_rows = ws.get_all_values()
+                    if len(all_rows) < 2:
+                        return False, "Jadval bo'sh"
+
+                    id_clean = id_code.upper().strip()
+                    target_row_idx = None
+
+                    for r_idx in range(len(all_rows) - 1, 0, -1):
+                        row = all_rows[r_idx]
+                        if len(row) > 6:
+                            row_id = str(row[1]).upper().strip()
+                            row_tracks = str(row[6]).strip()
+                            if row_id == id_clean and (track_codes.strip() in row_tracks or row_tracks in track_codes.strip()):
+                                target_row_idx = r_idx + 1
+                                break
+
+                    if not target_row_idx:
+                        for r_idx in range(len(all_rows) - 1, 0, -1):
+                            row = all_rows[r_idx]
+                            if len(row) > 1 and str(row[1]).upper().strip() == id_clean:
+                                target_row_idx = r_idx + 1
+                                break
+
+                    if not target_row_idx:
+                        return False, "Google Sheetsda mos qator topilmadi"
+
+                    ws.delete_rows(target_row_idx)
+                    return True, "O'chirildi"
+
+                res, msg = await asyncio.wait_for(loop.run_in_executor(None, _do_delete), timeout=25.0)
+                return res, msg
+            except Exception as e:
+                logger.error(f"Google Sheetsda yukni o'chirishda xatolik: {e}")
+                self._gc = None
+                return False, str(e)
+
     async def import_all_users_to_db(self) -> int:
         """
         Google Sheetsdagi barcha mijozlarni o'qib, SQLite bazasiga import qiladi (agar bazada bo'lmasa).

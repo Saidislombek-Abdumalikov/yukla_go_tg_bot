@@ -18,3 +18,8 @@ class ReportStates(StatesGroup):
     entering_weight = State()
     uploading_photo = State()
     confirming_report = State()
+
+class EditReportStates(StatesGroup):
+    entering_new_weight = State()
+    entering_new_tracks = State()
+

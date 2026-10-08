@@ -113,7 +113,55 @@ def user_card_actions_keyboard(user_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="📸 Foto-otchyot yaratish", callback_data=f"create_report_for_{user_id}")],
+            [InlineKeyboardButton(text="📦 Yuborilgan yuklar (Otchyotlar)", callback_data=f"user_cargos_{user_id}")],
             [InlineKeyboardButton(text="🔙 Mijozlar ro'yxatiga qaytish", callback_data="admin_action_users_1")]
+        ]
+    )
+
+def user_reports_list_keyboard(reports: list, user_id: int) -> InlineKeyboardMarkup:
+    buttons = []
+    for r in reports:
+        r_id = r["id"]
+        w = r.get("weight", 0)
+        usd = r.get("price_usd", 0)
+        status_icon = "🟢" if r.get("payment_status") == "tolandi" else "🔴"
+        date_str = r.get("created_at", "")[:10]
+        btn_text = f"📦 {w} kg — ${usd} {status_icon} ({date_str})"
+        buttons.append([InlineKeyboardButton(text=btn_text, callback_data=f"view_report_{r_id}_{user_id}")])
+
+    buttons.append([InlineKeyboardButton(text="🔙 Mijoz profiliga qaytish", callback_data=f"view_user_{user_id}")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+def report_manage_keyboard(report_id: int, user_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✏️ Og'irlikni o'zgartirish", callback_data=f"edit_rep_weight_{report_id}_{user_id}"),
+                InlineKeyboardButton(text="✏️ Trek-kodni tahrirlash", callback_data=f"edit_rep_tracks_{report_id}_{user_id}")
+            ],
+            [
+                InlineKeyboardButton(text="🗑 O'chirish", callback_data=f"del_rep_confirm_{report_id}_{user_id}")
+            ],
+            [
+                InlineKeyboardButton(text="🔙 Yuklar ro'yxatiga qaytish", callback_data=f"user_cargos_{user_id}")
+            ]
+        ]
+    )
+
+def report_delete_confirm_keyboard(report_id: int, user_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="🗑 Ha, o'chirilsin", callback_data=f"del_rep_do_{report_id}_{user_id}"),
+                InlineKeyboardButton(text="❌ Bekor qilish", callback_data=f"view_report_{report_id}_{user_id}")
+            ]
+        ]
+    )
+
+def cancel_edit_report_keyboard(report_id: int, user_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Bekor qilish", callback_data=f"view_report_{report_id}_{user_id}")]
         ]
     )
 

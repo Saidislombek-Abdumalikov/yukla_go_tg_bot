@@ -324,3 +324,49 @@ async def mark_reports_paid(id_codes: list) -> int:
         """, id_codes)
         await db.commit()
         return cursor.rowcount
+
+async def get_user_reports(id_code: str) -> list:
+    async with get_connection() as db:
+        async with db.execute("""
+            SELECT * FROM reports
+            WHERE UPPER(id_code) = UPPER(?)
+            ORDER BY id DESC
+            LIMIT 30
+        """, (id_code,)) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(r) for r in rows]
+
+async def get_report_by_id(report_id: int) -> dict | None:
+    async with get_connection() as db:
+        async with db.execute("SELECT * FROM reports WHERE id = ?", (report_id,)) as cursor:
+            row = await cursor.fetchone()
+            if row:
+                return dict(row)
+            return None
+
+async def update_report_weight(report_id: int, weight: float, price_usd: float, price_uzs: int) -> bool:
+    async with get_connection() as db:
+        cursor = await db.execute("""
+            UPDATE reports
+            SET weight = ?, price_usd = ?, price_uzs = ?
+            WHERE id = ?
+        """, (weight, price_usd, price_uzs, report_id))
+        await db.commit()
+        return cursor.rowcount > 0
+
+async def update_report_track_codes(report_id: int, track_codes: str) -> bool:
+    async with get_connection() as db:
+        cursor = await db.execute("""
+            UPDATE reports
+            SET track_codes = ?
+            WHERE id = ?
+        """, (track_codes, report_id))
+        await db.commit()
+        return cursor.rowcount > 0
+
+async def delete_report(report_id: int) -> bool:
+    async with get_connection() as db:
+        cursor = await db.execute("DELETE FROM reports WHERE id = ?", (report_id,))
+        await db.commit()
+        return cursor.rowcount > 0
+
