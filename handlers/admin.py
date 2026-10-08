@@ -815,30 +815,18 @@ async def sync_report_message_changes(bot: Bot, report_id: int, user_id: int, ne
 
 async def sync_report_message_deletion(bot: Bot, report: dict, user_id: int):
     """
-    O'chirilgan yuk hisobotini mijoz chatidan va Telegram kanaldan o'chiradi (delete_message).
+    O'chirilgan yuk hisobotini mijoz chatidan va Telegram kanaldan bildirishnomasiz o'chiradi (delete_message).
     """
     client_msg_id = report.get("client_msg_id")
     channel_msg_id = report.get("channel_msg_id")
     channel_chat_id = report.get("channel_chat_id")
-    report_id = report.get("id")
-    track_codes = report.get("track_codes", "")
 
-    # 1. Mijoz chatidagi xabarni o'chirish
+    # 1. Mijoz chatidagi xabarni o'chirish (ovozsiz / bildirishnomasiz)
     if client_msg_id:
         try:
             await bot.delete_message(chat_id=user_id, message_id=client_msg_id)
         except Exception as e:
             logger.warning(f"Mijoz xabarini o'chirishda xatolik: {e}")
-
-    # Mijozga bekor qilinganini xabar berish
-    try:
-        await bot.send_message(
-            chat_id=user_id,
-            text=f"ℹ️ <b>Hurmatli mijoz, avval yuborilgan ushbu yuk hisoboti (#{report_id}, Trek: <code>{html.escape(track_codes)}</code>) admin tomonidan bekor qilindi (o'chirildi).</b>",
-            parse_mode="HTML"
-        )
-    except Exception as e:
-        logger.warning(f"Mijozga bekor qilish xabari yuborishda xatolik: {e}")
 
     # 2. Kanal postini o'chirish
     if channel_msg_id and channel_chat_id:
