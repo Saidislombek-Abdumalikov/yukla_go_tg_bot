@@ -536,11 +536,20 @@ async def callback_view_user(query: CallbackQuery, bot: Bot):
     hudud_esc = html.escape(user.get("hudud") or "")
     username_esc = html.escape(user.get("username") or "")
 
+    cargo_count = user.get("cargo_count", 0)
+    unpaid_count = user.get("unpaid_cargo_count", 0)
+    paid_count = max(0, cargo_count - unpaid_count)
+
+    cargos_stat = f"📦 Jami yuklar: <b>{cargo_count} ta</b>"
+    if cargo_count > 0:
+        cargos_stat += f" (🟢 {paid_count} to'langan, 🔴 {unpaid_count} qarzdor)"
+
     info_text = (
         f"👤 <b>Mijoz Profili:</b>\n\n"
         f"🆔 ID Kod: <b>{user.get('id_code') or 'Berilmagan'}</b>\n"
         f"📌 Holati: <b>{user.get('status')}</b>\n"
         f"👤 Ism-familiya: {first_name_esc} {last_name_esc}\n"
+        f"{cargos_stat}\n"
         f"📍 Hudud: {hudud_esc}\n"
         f"📱 Telefon: {user.get('phone')}\n"
         f"🪪 Pasport: {user.get('passport_series')}\n"
@@ -554,7 +563,7 @@ async def callback_view_user(query: CallbackQuery, bot: Bot):
     await query.message.answer(
         info_text,
         parse_mode="HTML",
-        reply_markup=user_card_actions_keyboard(user_id)
+        reply_markup=user_card_actions_keyboard(user_id, cargo_count)
     )
 
 @admin_router.message(Command("user"))
@@ -586,11 +595,20 @@ async def cmd_view_user(message: Message, bot: Bot):
     hudud_esc = html.escape(user.get("hudud") or "")
     username_esc = html.escape(user.get("username") or "")
 
+    cargo_count = user.get("cargo_count", 0)
+    unpaid_count = user.get("unpaid_cargo_count", 0)
+    paid_count = max(0, cargo_count - unpaid_count)
+
+    cargos_stat = f"📦 Jami yuklar: <b>{cargo_count} ta</b>"
+    if cargo_count > 0:
+        cargos_stat += f" (🟢 {paid_count} to'langan, 🔴 {unpaid_count} qarzdor)"
+
     info_text = (
         f"👤 <b>Foydalanuvchi ma'lumotlari:</b>\n\n"
         f"🆔 ID Kod: <b>{user.get('id_code') or 'Berilmagan'}</b>\n"
         f"📌 Holati: <b>{user.get('status')}</b>\n"
         f"👤 Ism: {first_name_esc} {last_name_esc}\n"
+        f"{cargos_stat}\n"
         f"📍 Hudud: {hudud_esc}\n"
         f"📱 Telefon: {user.get('phone')}\n"
         f"🪪 Pasport: {user.get('passport_series')}\n"
@@ -604,7 +622,7 @@ async def cmd_view_user(message: Message, bot: Bot):
     await message.answer(
         info_text,
         parse_mode="HTML",
-        reply_markup=user_card_actions_keyboard(user["user_id"])
+        reply_markup=user_card_actions_keyboard(user["user_id"], cargo_count)
     )
 
 # --- USER CARGOS & REPORT MANAGEMENT (VIEW / EDIT / DELETE) ---

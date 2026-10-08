@@ -106,11 +106,12 @@ def report_confirm_keyboard() -> InlineKeyboardMarkup:
         ]
     )
 
-def user_card_actions_keyboard(user_id: int) -> InlineKeyboardMarkup:
+def user_card_actions_keyboard(user_id: int, cargo_count: int = 0) -> InlineKeyboardMarkup:
+    cargo_label = f"📦 Yuborilgan yuklar ({cargo_count} ta)" if cargo_count > 0 else "📦 Yuborilgan yuklar (0 ta)"
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="📸 Foto-otchyot yaratish", callback_data=f"create_report_for_{user_id}")],
-            [InlineKeyboardButton(text="📦 Yuborilgan yuklar (Otchyotlar)", callback_data=f"user_cargos_{user_id}")],
+            [InlineKeyboardButton(text=cargo_label, callback_data=f"user_cargos_{user_id}")],
             [InlineKeyboardButton(text="🔙 Mijozlar ro'yxatiga qaytish", callback_data="admin_action_users_1")]
         ]
     )
@@ -170,8 +171,19 @@ def users_pagination_keyboard(users: list, current_page: int, total_pages: int) 
         f_name = u.get("first_name", "")
         l_name = u.get("last_name", "")
         name = f"{f_name} {l_name[:1]}.".strip()
+        cargo_cnt = u.get("cargo_count", 0)
+        unpaid_cnt = u.get("unpaid_cargo_count", 0)
+
+        if cargo_cnt > 0:
+            if unpaid_cnt > 0:
+                badge = f"📦 {cargo_cnt} ta | 🔴 {unpaid_cnt}"
+            else:
+                badge = f"📦 {cargo_cnt} ta 🟢"
+        else:
+            badge = "📦 0 ta"
+
         buttons.append([
-            InlineKeyboardButton(text=f"👤 {id_code} — {name}", callback_data=f"view_user_{u.get('user_id')}")
+            InlineKeyboardButton(text=f"👤 {id_code} — {name} ({badge})", callback_data=f"view_user_{u.get('user_id')}")
         ])
 
     # Navigation buttons

@@ -87,7 +87,12 @@ async def init_db():
 
 async def get_user(user_id: int):
     async with get_connection() as db:
-        async with db.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)) as cursor:
+        async with db.execute("""
+            SELECT users.*,
+                   (SELECT COUNT(*) FROM reports WHERE UPPER(reports.id_code) = UPPER(users.id_code)) as cargo_count,
+                   (SELECT COUNT(*) FROM reports WHERE UPPER(reports.id_code) = UPPER(users.id_code) AND reports.payment_status != 'tolandi') as unpaid_cargo_count
+            FROM users WHERE user_id = ?
+        """, (user_id,)) as cursor:
             row = await cursor.fetchone()
             if row:
                 return dict(row)
@@ -95,7 +100,12 @@ async def get_user(user_id: int):
 
 async def get_user_by_id_code(id_code: str):
     async with get_connection() as db:
-        async with db.execute("SELECT * FROM users WHERE id_code = ?", (id_code,)) as cursor:
+        async with db.execute("""
+            SELECT users.*,
+                   (SELECT COUNT(*) FROM reports WHERE UPPER(reports.id_code) = UPPER(users.id_code)) as cargo_count,
+                   (SELECT COUNT(*) FROM reports WHERE UPPER(reports.id_code) = UPPER(users.id_code) AND reports.payment_status != 'tolandi') as unpaid_cargo_count
+            FROM users WHERE UPPER(id_code) = UPPER(?)
+        """, (id_code,)) as cursor:
             row = await cursor.fetchone()
             if row:
                 return dict(row)
@@ -274,7 +284,10 @@ async def count_approved_users() -> int:
 async def get_approved_users(limit: int = 10, offset: int = 0):
     async with get_connection() as db:
         async with db.execute("""
-            SELECT * FROM users WHERE status = 'approved'
+            SELECT users.*,
+                   (SELECT COUNT(*) FROM reports WHERE UPPER(reports.id_code) = UPPER(users.id_code)) as cargo_count,
+                   (SELECT COUNT(*) FROM reports WHERE UPPER(reports.id_code) = UPPER(users.id_code) AND reports.payment_status != 'tolandi') as unpaid_cargo_count
+            FROM users WHERE status = 'approved'
             ORDER BY CAST(SUBSTR(id_code, 3) AS INTEGER) ASC
             LIMIT ? OFFSET ?
         """, (limit, offset)) as cursor:
@@ -285,7 +298,10 @@ async def search_approved_users(query: str):
     q = f"%{query}%"
     async with get_connection() as db:
         async with db.execute("""
-            SELECT * FROM users
+            SELECT users.*,
+                   (SELECT COUNT(*) FROM reports WHERE UPPER(reports.id_code) = UPPER(users.id_code)) as cargo_count,
+                   (SELECT COUNT(*) FROM reports WHERE UPPER(reports.id_code) = UPPER(users.id_code) AND reports.payment_status != 'tolandi') as unpaid_cargo_count
+            FROM users
             WHERE status = 'approved' AND (
                 id_code LIKE ? OR
                 first_name LIKE ? OR
