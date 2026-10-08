@@ -1,6 +1,7 @@
 # Environment & Secret files
 .env
 credentials.json
+.snapshots/
 
 # Python
 __pycache__/

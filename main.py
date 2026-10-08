@@ -76,6 +76,16 @@ async def main():
     await init_db()
     logger.info("SQLite ma'lumotlar bazasi tayyor.")
 
+    # Render qayta ishga tushganda ma'lumotlar yo'qolmasligi uchun Google Sheetsdan sinxronlash
+    try:
+        from sheets import sheet_manager
+        if sheet_manager.is_configured():
+            imported_count = await sheet_manager.import_all_users_to_db()
+            if imported_count > 0:
+                logger.info(f"Google Sheetsdan {imported_count} ta yangi mijoz bazaga yuklandi.")
+    except Exception as e:
+        logger.warning(f"Google Sheets avtomatik import xatosi: {e}")
+
     if not BOT_TOKEN or BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
         logger.error("XATOLIK: .env faylida BOT_TOKEN ko'rsatilmagan!")
         return

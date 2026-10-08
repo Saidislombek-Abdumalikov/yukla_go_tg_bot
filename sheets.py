@@ -1,10 +1,12 @@
 import os
+import json
 import logging
 import asyncio
 from typing import Optional, Tuple
 import gspread
 from google.oauth2.service_account import Credentials
 from config import CREDENTIALS_FILE, GOOGLE_SHEET_NAME, GOOGLE_SHEET_CARGOS_TAB
+from database import get_connection
 
 logger = logging.getLogger(__name__)
 
@@ -48,20 +50,32 @@ class GoogleSheetManager:
         self._lock = asyncio.Lock()
 
     def is_configured(self) -> bool:
-        return os.path.exists(CREDENTIALS_FILE)
+        return (
+            bool(os.getenv("GOOGLE_CREDENTIALS_JSON"))
+            or os.path.exists(CREDENTIALS_FILE)
+            or os.path.exists("/etc/secrets/credentials.json")
+        )
 
     def _get_client_sync(self) -> gspread.Client:
         if self._gc is None:
-            credentials = Credentials.from_service_account_file(
-                CREDENTIALS_FILE,
-                scopes=SCOPES
-            )
+            raw_creds = os.getenv("GOOGLE_CREDENTIALS_JSON")
+            if raw_creds:
+                info = json.loads(raw_creds)
+                credentials = Credentials.from_service_account_info(info, scopes=SCOPES)
+            else:
+                cred_path = CREDENTIALS_FILE
+                if not os.path.exists(cred_path) and os.path.exists("/etc/secrets/credentials.json"):
+                    cred_path = "/etc/secrets/credentials.json"
+                credentials = Credentials.from_service_account_file(
+                    cred_path,
+                    scopes=SCOPES
+                )
             self._gc = gspread.authorize(credentials)
         return self._gc
 
     def _get_spreadsheet_sync(self) -> gspread.Spreadsheet:
         if not self.is_configured():
-            raise FileNotFoundError(f"Credentials fayli '{CREDENTIALS_FILE}' topilmadi!")
+            raise FileNotFoundError(f"Google credentials topilmadi ('{CREDENTIALS_FILE}' yoki GOOGLE_CREDENTIALS_JSON)!")
 
         gc = self._get_client_sync()
         try:
@@ -236,4 +250,63 @@ class GoogleSheetManager:
                 self._gc = None
                 return 0, []
 
+    async def import_all_users_to_db(self) -> int:
+        """
+        Google Sheetsdagi barcha mijozlarni o'qib, SQLite bazasiga import qiladi (agar bazada bo'lmasa).
+        Render qayta ishga tushganda ma'lumotlar yo'qolmasligi uchun xizmat qiladi.
+        """
+        if not self.is_configured():
+            return 0
+        try:
+            loop = asyncio.get_running_loop()
+            def _fetch_rows():
+                ws = self._get_users_worksheet_sync()
+                return ws.get_all_values()
+
+            rows = await asyncio.wait_for(loop.run_in_executor(None, _fetch_rows), timeout=20.0)
+            if len(rows) <= 1:
+                return 0
+
+            imported = 0
+            async with get_connection() as db:
+                for row in rows[1:]:
+                    if not row or len(row) < 10:
+                        continue
+                    id_code = row[0].strip()
+                    first_name = row[1].strip() if len(row) > 1 else ""
+                    last_name = row[2].strip() if len(row) > 2 else ""
+                    phone = row[3].strip() if len(row) > 3 else ""
+                    extra_phone = row[4].strip() if len(row) > 4 else ""
+                    hudud = row[5].strip() if len(row) > 5 else ""
+                    address = row[6].strip() if len(row) > 6 else ""
+                    passport_series = row[7].strip() if len(row) > 7 else ""
+                    pinfl = row[8].strip() if len(row) > 8 else ""
+                    tg_id_str = row[9].strip() if len(row) > 9 else ""
+                    username = row[10].strip() if len(row) > 10 else ""
+                    approved_at = row[11].strip() if len(row) > 11 else ""
+
+                    if not tg_id_str.isdigit():
+                        continue
+                    tg_id = int(tg_id_str)
+
+                    cursor = await db.execute("""
+                        INSERT OR IGNORE INTO users (
+                            user_id, username, hudud, phone, extra_phone,
+                            first_name, last_name, passport_series, pinfl, address,
+                            id_code, status, approved_at, synced_to_sheets
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'approved', ?, 1)
+                    """, (
+                        tg_id, username, hudud, phone, extra_phone,
+                        first_name, last_name, passport_series, pinfl, address,
+                        id_code, approved_at
+                    ))
+                    if cursor.rowcount > 0:
+                        imported += 1
+                await db.commit()
+            return imported
+        except Exception as e:
+            logger.error(f"Google Sheetsdan bazaga import qilishda xatolik: {e}")
+            return 0
+
 sheet_manager = GoogleSheetManager()
+
