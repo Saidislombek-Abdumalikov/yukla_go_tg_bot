@@ -3,6 +3,8 @@ import logging
 import html
 import datetime
 import re
+import uuid
+import math
 from aiogram import Router, F, Bot
 from aiogram.types import CallbackQuery, Message, ChatMemberUpdated, FSInputFile
 from aiogram.filters import Command
@@ -39,6 +41,7 @@ from database import (
     mark_reports_paid,
     get_user_reports,
     get_report_by_id,
+    get_report_by_uid,
     update_report_weight,
     update_report_track_codes,
     delete_report
@@ -94,7 +97,7 @@ async def callback_approve(query: CallbackQuery, bot: Bot):
         return
 
     # Background / immediate Google Sheets sync
-    synced, sheet_msg = await sheet_manager.append_user(updated_user)
+    synced, sheet_msg = await sheet_manager.save_or_update_user_application(user_id, updated_user)
     if synced:
         await mark_as_synced(user_id)
         sheet_status = "✅ Google Sheetsga yozildi"
@@ -151,6 +154,13 @@ async def callback_reject(query: CallbackQuery, bot: Bot):
     if not success:
         await query.message.answer(f"⚠️ {msg}")
         return
+
+    # Sync rejection to Google Sheets
+    try:
+        if user:
+            await sheet_manager.save_or_update_user_application(user_id, user)
+    except Exception as e:
+        logger.warning(f"Sheetsda rad etish holatini yangilashda xatolik: {e}")
 
     # Edit admin message
     try:
@@ -347,14 +357,17 @@ async def cmd_mark_paid(message: Message, bot: Bot):
         await message.answer("⚠️ Hech qanday ID kod topilmadi. Masalan: <code>/tolandi YK1 YK2</code>", parse_mode="HTML")
         return
 
-    # 1. Google Sheetsda 'To'landi' deb yangilash
+    # 1. Google Sheetsda 'To'landi' deb yangilash (asosiy baza)
     sheet_updated_count, sheet_updated_codes = await sheet_manager.mark_cargos_paid(id_codes)
 
-    # 2. SQLite bazada tolandi deb belgilash
-    db_updated_count, db_updated_codes = await mark_reports_paid(id_codes)
+    # 2. Faqat Sheetsda muvaffaqiyatli tasdiqlangan IDlar bo'yicha SQLite lokal nusxasini yangilash
+    db_updated_count = 0
+    db_updated_codes = []
+    if sheet_updated_codes:
+        db_updated_count, db_updated_codes = await mark_reports_paid(sheet_updated_codes)
 
-    # Haqiqatan ham qarzdor yuk bo'lgan va to'langan ID lar to'plami
-    actually_paid_set = {str(c).upper().strip() for c in (sheet_updated_codes + db_updated_codes)}
+    # Haqiqatan ham Sheetsda tasdiqlangan va to'langan ID lar to'plami
+    actually_paid_set = {str(c).upper().strip() for c in sheet_updated_codes}
 
     notified_list = []
     success_count = 0
@@ -742,7 +755,8 @@ async def callback_edit_rep_weight(query: CallbackQuery, state: FSMContext):
         user_id=user_id,
         id_code=report.get("id_code", ""),
         track_codes=report.get("track_codes", ""),
-        old_weight=report.get("weight", 0.0)
+        old_weight=report.get("weight", 0.0),
+        report_uid=report.get("report_uid", "")
     )
 
     await query.message.answer(
@@ -813,38 +827,50 @@ async def sync_report_message_changes(bot: Bot, report_id: int, user_id: int, ne
         except Exception as e:
             logger.warning(f"Kanal xabarini edit qilishda xatolik: {e}")
 
-async def sync_report_message_deletion(bot: Bot, report: dict, user_id: int):
+async def sync_report_message_deletion(bot: Bot, report: dict, user_id: int) -> tuple[bool, bool]:
     """
     O'chirilgan yuk hisobotini mijoz chatidan va Telegram kanaldan bildirishnomasiz o'chiradi (delete_message).
+    Returns (client_deleted: bool, channel_deleted: bool)
     """
     client_msg_id = report.get("client_msg_id")
     channel_msg_id = report.get("channel_msg_id")
     channel_chat_id = report.get("channel_chat_id")
 
-    # 1. Mijoz chatidagi xabarni o'chirish (ovozsiz / bildirishnomasiz)
+    del_client_ok = False
     if client_msg_id:
         try:
             await bot.delete_message(chat_id=user_id, message_id=client_msg_id)
+            del_client_ok = True
         except Exception as e:
             logger.warning(f"Mijoz xabarini o'chirishda xatolik: {e}")
 
-    # 2. Kanal postini o'chirish
+    del_ch_ok = False
     if channel_msg_id and channel_chat_id:
         try:
             target_ch = int(channel_chat_id) if channel_chat_id.startswith("-") and channel_chat_id[1:].isdigit() else channel_chat_id
             await bot.delete_message(chat_id=target_ch, message_id=channel_msg_id)
+            del_ch_ok = True
         except Exception as e:
             logger.warning(f"Kanal xabarini o'chirishda xatolik: {e}")
 
-@admin_router.message(EditReportStates.entering_new_weight, F.text)
+    return del_client_ok, del_ch_ok
+
+@admin_router.message(EditReportStates.entering_new_weight)
 async def state_save_new_weight(message: Message, state: FSMContext, bot: Bot):
     if not await check_admin_or_reject(message):
+        return
+
+    if not message.text:
+        await message.answer(
+            "⚠️ Noto'g'ri qiymat! Iltimos, og'irlikni to'g'ri musbat sonda kiriting (masalan: <code>3.5</code>):",
+            parse_mode="HTML"
+        )
         return
 
     val = message.text.strip().replace(",", ".")
     try:
         new_weight = float(val)
-        if new_weight <= 0 or new_weight > 5000:
+        if not math.isfinite(new_weight) or new_weight <= 0 or round(new_weight, 2) <= 0 or new_weight > 5000:
             raise ValueError()
         new_weight = round(new_weight, 2)
     except ValueError:
@@ -859,22 +885,32 @@ async def state_save_new_weight(message: Message, state: FSMContext, bot: Bot):
     user_id = data.get("user_id")
     id_code = data.get("id_code")
     track_codes = data.get("track_codes")
+    report_uid = data.get("report_uid")
 
     rate = await get_current_usd_rate()
     price_usd = round(new_weight * DEFAULT_KG_PRICE, 2)
     price_uzs = int(round(price_usd * rate))
 
-    # 1. Bazada yangilash
-    await update_report_weight(report_id, new_weight, price_usd, price_uzs)
-
-    # 2. Google Sheetsda yangilash
-    await sheet_manager.update_cargo_report(
+    # 1. Avval Google Sheetsda yangilash (asosiy baza)
+    sheet_ok, sheet_msg = await sheet_manager.update_cargo_report(
         id_code=id_code,
         old_track_codes=track_codes,
         new_weight=new_weight,
         new_price_usd=price_usd,
-        new_price_uzs=price_uzs
+        new_price_uzs=price_uzs,
+        report_uid=report_uid
     )
+    if not sheet_ok:
+        await message.answer(
+            f"⚠️ <b>Google Sheetsda yangilash amalga oshmadi:</b> {sheet_msg}\n\n"
+            f"Lokal baza va Telegram xabarlari o'zgartirilmadi. Qaytadan urinib ko'ring.",
+            parse_mode="HTML",
+            reply_markup=report_manage_keyboard(report_id, user_id)
+        )
+        return
+
+    # 2. Bazada yangilash
+    await update_report_weight(report_id, new_weight, price_usd, price_uzs)
 
     # 3. Mijoz va kanal xabarlarini yangilash
     await sync_report_message_changes(bot, report_id, user_id, track_codes, new_weight, price_usd, price_uzs)
@@ -910,7 +946,8 @@ async def callback_edit_rep_tracks(query: CallbackQuery, state: FSMContext):
         report_id=report_id,
         user_id=user_id,
         id_code=report.get("id_code", ""),
-        old_tracks=report.get("track_codes", "")
+        old_tracks=report.get("track_codes", ""),
+        report_uid=report.get("report_uid", "")
     )
 
     await query.message.answer(
@@ -921,9 +958,13 @@ async def callback_edit_rep_tracks(query: CallbackQuery, state: FSMContext):
         reply_markup=cancel_edit_report_keyboard(report_id, user_id)
     )
 
-@admin_router.message(EditReportStates.entering_new_tracks, F.text)
+@admin_router.message(EditReportStates.entering_new_tracks)
 async def state_save_new_tracks(message: Message, state: FSMContext, bot: Bot):
     if not await check_admin_or_reject(message):
+        return
+
+    if not message.text:
+        await message.answer("⚠️ Iltimos, kamida bitta trek-kod kiriting:")
         return
 
     raw_text = message.text.strip()
@@ -939,16 +980,26 @@ async def state_save_new_tracks(message: Message, state: FSMContext, bot: Bot):
     user_id = data.get("user_id")
     id_code = data.get("id_code")
     old_tracks = data.get("old_tracks")
+    report_uid = data.get("report_uid")
 
-    # 1. Bazada yangilash
-    await update_report_track_codes(report_id, new_track_codes)
-
-    # 2. Google Sheetsda yangilash
-    await sheet_manager.update_cargo_report(
+    # 1. Avval Google Sheetsda yangilash (asosiy baza)
+    sheet_ok, sheet_msg = await sheet_manager.update_cargo_report(
         id_code=id_code,
         old_track_codes=old_tracks,
-        new_track_codes=new_track_codes
+        new_track_codes=new_track_codes,
+        report_uid=report_uid
     )
+    if not sheet_ok:
+        await message.answer(
+            f"⚠️ <b>Google Sheetsda yangilash amalga oshmadi:</b> {sheet_msg}\n\n"
+            f"Lokal baza va Telegram xabarlari o'zgartirilmadi. Qaytadan urinib ko'ring.",
+            parse_mode="HTML",
+            reply_markup=report_manage_keyboard(report_id, user_id)
+        )
+        return
+
+    # 2. Bazada yangilash
+    await update_report_track_codes(report_id, new_track_codes)
 
     # 3. Mijoz va kanal xabarlarini yangilash
     rep = await get_report_by_id(report_id)
@@ -1006,19 +1057,33 @@ async def callback_del_rep_do(query: CallbackQuery, bot: Bot):
 
     id_code = report.get("id_code", "")
     track_codes = report.get("track_codes", "")
+    report_uid = report.get("report_uid", "")
 
-    # 1. Mijoz va kanal postini o'chirish
-    await sync_report_message_deletion(bot, report, user_id)
+    # 1. Avval Google Sheetsdan o'chirish (asosiy baza)
+    sheet_ok, sheet_msg = await sheet_manager.delete_cargo_report(
+        id_code=id_code,
+        track_codes=track_codes,
+        report_uid=report_uid
+    )
+    if not sheet_ok:
+        await query.message.answer(
+            f"⚠️ <b>Google Sheetsdan o'chirish amalga oshmadi:</b> {sheet_msg}\n\n"
+            f"Lokal baza va Telegram xabarlari o'zgartirilmadi. Qaytadan urinib ko'ring.",
+            parse_mode="HTML"
+        )
+        return
 
-    # 2. Bazadan o'chirish
+    # 2. Mijoz va kanal postini o'chirish
+    del_client_ok, del_ch_ok = await sync_report_message_deletion(bot, report, user_id)
+
+    # 3. Bazadan o'chirish
     await delete_report(report_id)
 
-    # 3. Google Sheetsdan o'chirish
-    await sheet_manager.delete_cargo_report(id_code, track_codes)
+    tg_info = "Telegram xabarlaridan olib tashlandi." if (del_client_ok or del_ch_ok) else "Telegram xabari topilmadi yoki o'chirilmadi."
 
     await query.message.answer(
         f"🗑 <b>#{report_id} hisoboti muvaffaqiyatli o'chirildi!</b>\n"
-        f"Baza, Google Sheets va Telegram xabarlaridan olib tashlandi.",
+        f"Baza va Google Sheetsdan olib tashlandi. {tg_info}",
         parse_mode="HTML"
     )
 
@@ -1075,26 +1140,67 @@ async def cmd_sync_sheets(message: Message):
 
     await message.answer("🔄 Google Sheets bilan ikki tomonlama to'liq sinxronizatsiya boshlandi...")
 
+    errors = []
+
     # 1. Sheetsdan bazaga yangi mijozlar va yuklarni import qilish
-    u_imp = await sheet_manager.import_all_users_to_db()
-    c_imp = await sheet_manager.import_all_cargos_to_db()
+    u_res = await sheet_manager.import_all_users_to_db()
+    try:
+        u_ok, u_imp, u_msg = u_res
+    except Exception:
+        u_ok, u_imp, u_msg = True, int(u_res), "ok"
+    if not u_ok:
+        errors.append(f"Mijozlarni import qilishda xatolik: {u_msg}")
+
+    c_res = await sheet_manager.import_all_cargos_to_db()
+    try:
+        c_ok, c_imp, c_msg = c_res
+    except Exception:
+        c_ok, c_imp, c_msg = True, int(c_res), "ok"
+    if not c_ok:
+        errors.append(f"Yuklarni import qilishda xatolik: {c_msg}")
+
+    # Sozlamalarni ham sinxronlaymiz
+    s_res = await sheet_manager.import_settings_from_sheets()
+    try:
+        s_ok, s_imp, s_msg = s_res
+    except Exception:
+        s_ok, s_imp, s_msg = True, int(s_res), "ok"
+    if not s_ok:
+        errors.append(f"Sozlamalarni import qilishda xatolik: {s_msg}")
 
     # 2. Bazadagi hali Sheetsga yozilmagan mijozlarni Sheetsga yuborish
     unsynced = await get_unsynced_users()
     push_count = 0
+    push_errors = 0
     for user in unsynced:
         ok, msg = await sheet_manager.append_user(user)
         if ok:
             await mark_as_synced(user["user_id"])
             push_count += 1
+        else:
+            push_errors += 1
 
-    await message.answer(
-        f"✅ <b>Google Sheets sinxronizatsiyasi yakunlandi!</b>\n\n"
-        f"📥 Sheetsdan bazaga tiklandi: <b>{u_imp} ta mijoz, {c_imp} ta yuk</b>\n"
-        f"📤 Bazadan Sheetsga yozildi: <b>{push_count} ta mijoz</b>\n\n"
-        f"Barcha ma'lumotlar 100% Google Sheets bilan to'liq mos holatda!",
-        parse_mode="HTML"
-    )
+    if push_errors > 0:
+        errors.append(f"{push_errors} ta mijozni Sheetsga eksport qilishda xatolik yuz berdi")
+
+    if errors:
+        err_text = "\n".join(f"• ⚠️ {e}" for e in errors)
+        await message.answer(
+            f"⚠️ <b>Google Sheets sinxronizatsiyasida xatoliklar yuz berdi:</b>\n\n"
+            f"📥 Qisman tiklandi: <b>{u_imp} ta mijoz, {c_imp} ta yuk</b>\n"
+            f"📤 Bazadan Sheetsga yozildi: <b>{push_count} ta mijoz</b>\n\n"
+            f"<b>Xatoliklar ro'yxati:</b>\n{err_text}\n\n"
+            f"<i>Iltimos, ulanishni tekshirib qaytadan urinib ko'ring.</i>",
+            parse_mode="HTML"
+        )
+    else:
+        await message.answer(
+            f"✅ <b>Google Sheets sinxronizatsiyasi muvaffaqiyatli yakunlandi!</b>\n\n"
+            f"📥 Sheetsdan bazaga tiklandi: <b>{u_imp} ta mijoz, {c_imp} ta yuk, {s_imp} ta sozlama</b>\n"
+            f"📤 Bazadan Sheetsga yozildi: <b>{push_count} ta mijoz</b>\n\n"
+            f"Barcha ma'lumotlar Google Sheets bilan to'liq moslashtirildi!",
+            parse_mode="HTML"
+        )
 
 # --- FOTO-OTCHYOT FSM FLOW ---
 @admin_router.message(Command("otchyot"))
@@ -1158,6 +1264,16 @@ async def state_user_chosen(message: Message, state: FSMContext):
     msg_ids = data.get("msg_ids", [])
     msg_ids.append(message.message_id)
 
+    if not message.text:
+        err_msg = await message.answer(
+            "⚠️ Iltimos, mijozning ID kodini yoki raqamini matn sifatida kiriting (masalan: <code>YK1</code>):",
+            parse_mode="HTML",
+            reply_markup=cancel_fsm_keyboard()
+        )
+        msg_ids.append(err_msg.message_id)
+        await state.update_data(msg_ids=msg_ids)
+        return
+
     query_val = message.text.strip()
     user = None
     if query_val.isdigit():
@@ -1203,6 +1319,12 @@ async def state_tracks_entered(message: Message, state: FSMContext):
     msg_ids = data.get("msg_ids", [])
     msg_ids.append(message.message_id)
 
+    if not message.text:
+        prompt = await message.answer("⚠️ Iltimos, kamida bitta trek-kod kiriting:", reply_markup=cancel_fsm_keyboard())
+        msg_ids.append(prompt.message_id)
+        await state.update_data(msg_ids=msg_ids)
+        return
+
     tracks = message.text.strip()
     if not tracks:
         prompt = await message.answer("⚠️ Iltimos, kamida bitta trek-kod kiriting:", reply_markup=cancel_fsm_keyboard())
@@ -1231,10 +1353,16 @@ async def state_weight_entered(message: Message, state: FSMContext):
     msg_ids = data.get("msg_ids", [])
     msg_ids.append(message.message_id)
 
+    if not message.text:
+        prompt = await message.answer("⚠️ Iltimos, og'irlikni to'g'ri musbat sonda kiriting (masalan: <code>2.5</code>):", parse_mode="HTML", reply_markup=cancel_fsm_keyboard())
+        msg_ids.append(prompt.message_id)
+        await state.update_data(msg_ids=msg_ids)
+        return
+
     weight_str = message.text.strip().replace(",", ".")
     try:
         weight = float(weight_str)
-        if weight <= 0:
+        if not math.isfinite(weight) or weight <= 0 or round(weight, 2) <= 0 or weight > 5000:
             raise ValueError()
     except ValueError:
         prompt = await message.answer("⚠️ Iltimos, og'irlikni to'g'ri musbat sonda kiriting (masalan: <code>2.5</code>):", parse_mode="HTML", reply_markup=cancel_fsm_keyboard())
@@ -1364,9 +1492,12 @@ async def callback_confirm_report(query: CallbackQuery, state: FSMContext, bot: 
             logger.error(f"Kanalga ({channel_id}) foto-otchyot yuborishda xatolik: {e}")
             channel_err = str(e)
 
-    # 3. Save to SQLite database
+    # 3. Yagona timestamp va yagona report_uid yaratamiz
     now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    report_uid = f"rpt_{uuid.uuid4().hex[:12]}"
     full_name = f"{user.get('first_name', '')} {user.get('last_name', '')}".strip()
+
+    # Save to SQLite database
     await save_report({
         "user_id": user.get("user_id"),
         "id_code": user.get("id_code"),
@@ -1380,10 +1511,11 @@ async def callback_confirm_report(query: CallbackQuery, state: FSMContext, bot: 
         "created_at": now_str,
         "client_msg_id": client_msg_id,
         "channel_msg_id": channel_msg_id,
-        "channel_chat_id": channel_chat_str
+        "channel_chat_id": channel_chat_str,
+        "report_uid": report_uid
     })
 
-    # 4. Save to Google Sheets "Yuklar" tab
+    # 4. Save to Google Sheets "Yuklar" tab (including technical columns)
     sheet_ok, sheet_msg = await sheet_manager.append_cargo({
         "created_at": now_str,
         "id_code": user.get("id_code"),
@@ -1394,7 +1526,13 @@ async def callback_confirm_report(query: CallbackQuery, state: FSMContext, bot: 
         "track_codes": track_codes,
         "weight": weight,
         "price_usd": price_usd,
-        "price_uzs": price_uzs
+        "price_uzs": price_uzs,
+        "payment_status": "Qarzdor",
+        "photo_file_id": photo_file_id,
+        "client_msg_id": client_msg_id,
+        "channel_msg_id": channel_msg_id,
+        "channel_chat_id": channel_chat_str,
+        "report_uid": report_uid
     })
 
     # 5. Clean Admin Chat (Delete temporary questions, user inputs, preview photo)

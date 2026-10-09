@@ -11,6 +11,7 @@ from aiohttp import web
 from config import BOT_TOKEN, ADMIN_IDS
 from database import init_db
 from handlers import register_routers
+from sheets import sheet_manager
 
 logging.basicConfig(
     level=logging.INFO,
@@ -79,12 +80,12 @@ async def main():
 
     # Render qayta ishga tushganda ma'lumotlar yo'qolmasligi uchun Google Sheetsdan to'liq sinxronlash
     try:
-        from sheets import sheet_manager
         if sheet_manager.is_configured():
+            s_count = await sheet_manager.import_settings_from_sheets()
             u_count = await sheet_manager.import_all_users_to_db()
             c_count = await sheet_manager.import_all_cargos_to_db()
-            if u_count > 0 or c_count > 0:
-                logger.info(f"Google Sheetsdan {u_count} ta mijoz va {c_count} ta yuk hisoboti bazaga yuklandi.")
+            if s_count > 0 or u_count > 0 or c_count > 0:
+                logger.info(f"Google Sheetsdan {s_count} ta sozlama, {u_count} ta mijoz va {c_count} ta yuk hisoboti bazaga yuklandi.")
     except Exception as e:
         logger.warning(f"Google Sheets avtomatik import xatosi: {e}")
 

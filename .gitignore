@@ -15,3 +15,4 @@ env/
 *.db-wal
 *.db-shm
 *.log
+*.zip

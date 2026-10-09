@@ -29,6 +29,7 @@ from database import (
     get_user,
     save_application
 )
+from sheets import sheet_manager
 
 logger = logging.getLogger(__name__)
 client_router = Router()
@@ -358,6 +359,10 @@ async def handle_submit_application(message: Message, state: FSMContext, bot: Bo
 
     # Save application to SQLite
     await save_application(user_id, data)
+    try:
+        await sheet_manager.save_or_update_user_application(user_id, data)
+    except Exception as e:
+        logger.warning(f"Sheetsga arizani saqlashda xatolik: {e}")
     await state.clear()
 
     # Inform user

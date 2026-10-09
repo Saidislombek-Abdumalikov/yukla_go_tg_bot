@@ -59,12 +59,14 @@ async def init_db():
                 created_at TEXT,
                 client_msg_id INTEGER,
                 channel_msg_id INTEGER,
-                channel_chat_id TEXT
+                channel_chat_id TEXT,
+                report_uid TEXT UNIQUE
             );
         """)
         await db.execute("CREATE INDEX IF NOT EXISTS idx_reports_id_code ON reports(id_code);")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_reports_report_uid ON reports(report_uid);")
 
-        # Column migration if reports was created earlier without payment_status or message tracking
+        # Column migration if reports was created earlier without payment_status, message tracking, or report_uid
         async with db.execute("PRAGMA table_info(reports);") as cursor:
             cols = [row[1] for row in await cursor.fetchall()]
             if "payment_status" not in cols:
@@ -75,6 +77,9 @@ async def init_db():
                 await db.execute("ALTER TABLE reports ADD COLUMN channel_msg_id INTEGER;")
             if "channel_chat_id" not in cols:
                 await db.execute("ALTER TABLE reports ADD COLUMN channel_chat_id TEXT;")
+            if "report_uid" not in cols:
+                await db.execute("ALTER TABLE reports ADD COLUMN report_uid TEXT;")
+                await db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_reports_report_uid ON reports(report_uid);")
 
         await db.execute("""
             CREATE TABLE IF NOT EXISTS settings (
@@ -113,13 +118,17 @@ async def get_user_by_id_code(id_code: str):
 
 async def save_application(user_id: int, data: dict):
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    created_at = data.get("created_at") or now
+    status = data.get("status", "pending")
+    id_code = data.get("id_code")
+    approved_at = data.get("approved_at")
     async with get_connection() as db:
         await db.execute("""
             INSERT INTO users (
                 user_id, username, hudud, phone, extra_phone,
                 first_name, last_name, passport_series, pinfl, address,
-                passport_front_id, passport_back_id, status, created_at, synced_to_sheets
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, 0)
+                passport_front_id, passport_back_id, id_code, status, created_at, approved_at, synced_to_sheets
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
             ON CONFLICT(user_id) DO UPDATE SET
                 username = excluded.username,
                 hudud = excluded.hudud,
@@ -130,10 +139,12 @@ async def save_application(user_id: int, data: dict):
                 passport_series = excluded.passport_series,
                 pinfl = excluded.pinfl,
                 address = excluded.address,
-                passport_front_id = excluded.passport_front_id,
-                passport_back_id = excluded.passport_back_id,
-                status = 'pending',
+                passport_front_id = COALESCE(NULLIF(excluded.passport_front_id, ''), users.passport_front_id),
+                passport_back_id = COALESCE(NULLIF(excluded.passport_back_id, ''), users.passport_back_id),
+                id_code = COALESCE(excluded.id_code, users.id_code),
+                status = excluded.status,
                 created_at = excluded.created_at,
+                approved_at = COALESCE(excluded.approved_at, users.approved_at),
                 synced_to_sheets = 0
         """, (
             user_id,
@@ -148,7 +159,10 @@ async def save_application(user_id: int, data: dict):
             data.get("address", ""),
             data.get("passport_front_id", ""),
             data.get("passport_back_id", ""),
-            now
+            id_code,
+            status,
+            created_at,
+            approved_at
         ))
         await db.commit()
 
@@ -316,13 +330,36 @@ async def search_approved_users(query: str):
 
 async def save_report(report_data: dict) -> int:
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    created_at = report_data.get("created_at") or now
+    report_uid = report_data.get("report_uid")
+    if not report_uid:
+        import uuid
+        report_uid = f"rpt_{uuid.uuid4().hex[:12]}"
+
+    payment_status = report_data.get("payment_status", "qarzdor")
+
     async with get_connection() as db:
         cursor = await db.execute("""
             INSERT INTO reports (
                 user_id, id_code, full_name, phone, track_codes,
                 weight, price_usd, price_uzs, photo_file_id, payment_status, created_at,
-                client_msg_id, channel_msg_id, channel_chat_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'qarzdor', ?, ?, ?, ?)
+                client_msg_id, channel_msg_id, channel_chat_id, report_uid
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(report_uid) DO UPDATE SET
+                user_id = excluded.user_id,
+                id_code = excluded.id_code,
+                full_name = excluded.full_name,
+                phone = excluded.phone,
+                track_codes = excluded.track_codes,
+                weight = excluded.weight,
+                price_usd = excluded.price_usd,
+                price_uzs = excluded.price_uzs,
+                photo_file_id = COALESCE(excluded.photo_file_id, reports.photo_file_id),
+                payment_status = excluded.payment_status,
+                created_at = excluded.created_at,
+                client_msg_id = COALESCE(excluded.client_msg_id, reports.client_msg_id),
+                channel_msg_id = COALESCE(excluded.channel_msg_id, reports.channel_msg_id),
+                channel_chat_id = COALESCE(excluded.channel_chat_id, reports.channel_chat_id)
         """, (
             report_data.get("user_id"),
             report_data.get("id_code"),
@@ -333,13 +370,53 @@ async def save_report(report_data: dict) -> int:
             report_data.get("price_usd"),
             report_data.get("price_uzs"),
             report_data.get("photo_file_id"),
-            now,
+            payment_status,
+            created_at,
             report_data.get("client_msg_id"),
             report_data.get("channel_msg_id"),
-            report_data.get("channel_chat_id")
+            report_data.get("channel_chat_id"),
+            report_uid
         ))
         await db.commit()
-        return cursor.lastrowid
+        if cursor.lastrowid:
+            return cursor.lastrowid
+        # In case of update, get id by report_uid
+        async with db.execute("SELECT id FROM reports WHERE report_uid = ?", (report_uid,)) as cur:
+            row = await cur.fetchone()
+            return row[0] if row else 0
+
+async def get_report_by_uid(report_uid: str) -> dict | None:
+    if not report_uid:
+        return None
+    async with get_connection() as db:
+        async with db.execute("SELECT * FROM reports WHERE report_uid = ?", (report_uid,)) as cursor:
+            row = await cursor.fetchone()
+            if row:
+                return dict(row)
+            return None
+
+async def delete_reports_not_in_uids(valid_uids: set, db: aiosqlite.Connection = None) -> int:
+    if not valid_uids:
+        return 0
+    clean_uids = [u for u in valid_uids if u]
+    if not clean_uids:
+        return 0
+    if db is not None:
+        placeholders = ",".join("?" for _ in clean_uids)
+        cursor = await db.execute(f"""
+            DELETE FROM reports
+            WHERE report_uid IS NOT NULL AND report_uid != '' AND report_uid NOT IN ({placeholders})
+        """, clean_uids)
+        return cursor.rowcount
+    else:
+        async with get_connection() as conn:
+            placeholders = ",".join("?" for _ in clean_uids)
+            cursor = await conn.execute(f"""
+                DELETE FROM reports
+                WHERE report_uid IS NOT NULL AND report_uid != '' AND report_uid NOT IN ({placeholders})
+            """, clean_uids)
+            await conn.commit()
+            return cursor.rowcount
 
 async def mark_reports_paid(id_codes: list) -> tuple:
     if not id_codes:
