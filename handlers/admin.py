@@ -44,7 +44,9 @@ from database import (
     get_report_by_uid,
     update_report_weight,
     update_report_track_codes,
-    delete_report
+    delete_report,
+    find_track_owner,
+    mark_user_tracks_arrived
 )
 from sheets import sheet_manager
 from keyboards import (
@@ -58,9 +60,11 @@ from keyboards import (
     user_reports_list_keyboard,
     report_manage_keyboard,
     report_delete_confirm_keyboard,
-    cancel_edit_report_keyboard
+    cancel_edit_report_keyboard,
+    cancel_search_track_keyboard,
+    track_found_actions_keyboard
 )
-from states import ReportStates, EditReportStates
+from states import ReportStates, EditReportStates, AdminSearchTrackStates
 
 logger = logging.getLogger(__name__)
 admin_router = Router()
@@ -1535,6 +1539,16 @@ async def callback_confirm_report(query: CallbackQuery, state: FSMContext, bot: 
         "report_uid": report_uid
     })
 
+    # 4.1 Update status of matching user tracks to 'yetib_kelgan' in DB and Sheets
+    try:
+        report_tracks = [t.strip().upper() for t in re.split(r'[\s,\n]+', track_codes) if t.strip()]
+        if report_tracks:
+            await mark_user_tracks_arrived(report_tracks)
+            for r_trk in report_tracks:
+                await sheet_manager.update_user_track_status(r_trk, "Yetib kelgan")
+    except Exception as e:
+        logger.warning(f"Mijoz treklari holatini yangilashda xatolik: {e}")
+
     # 5. Clean Admin Chat (Delete temporary questions, user inputs, preview photo)
     for mid in msg_ids:
         try:
@@ -1593,3 +1607,122 @@ async def cancel_report_flow(event: Message | CallbackQuery, state: FSMContext, 
         reply_markup=admin_panel_keyboard()
     )
     await state.clear()
+
+# --- Admin Track Search (Trek-kod bo'yicha qidirish) ---
+async def search_and_display_track_info(message: Message, query_text: str):
+    clean_query = query_text.strip().upper()
+    found = await find_track_owner(clean_query)
+
+    if not found:
+        await message.answer(
+            f"❌ <b>Trek-kod bo'yicha ma'lumot topilmadi!</b>\n\n"
+            f"<code>{html.escape(clean_query)}</code> trek-kodi birorta ham mijoz tomonidan ro'yxatga olinmagan va avval yuk hisoboti berilmagan.",
+            parse_mode="HTML",
+            reply_markup=track_found_actions_keyboard(0, clean_query)
+        )
+        return
+
+    first_name_esc = html.escape(found.get("first_name") or "")
+    last_name_esc = html.escape(found.get("last_name") or "")
+    id_code = found.get("id_code") or "Berilmagan"
+    phone_esc = html.escape(found.get("phone") or "")
+    hudud_esc = html.escape(found.get("hudud") or "")
+    address_esc = html.escape(found.get("address") or "")
+    user_id = found.get("user_id") or 0
+    username = found.get("username") or ""
+    desc = found.get("description") or ""
+    track_status = found.get("track_status") or "kutilmoqda"
+    status_icon = "✅ Yetib kelgan" if track_status == "yetib_kelgan" else "⏳ Kutilmoqda (omborda hali hisobot qilinmagan)"
+    track_date = found.get("track_created_at") or found.get("report_created_at") or ""
+
+    user_info_line = f"<b>{first_name_esc} {last_name_esc}</b>"
+    if username:
+        user_info_line += f" (@{html.escape(username)})"
+
+    text_parts = [
+        "🔍 <b>Trek-kod egasi topildi!</b>\n",
+        f"📦 <b>Trek-kod:</b> <code>{html.escape(clean_query)}</code>"
+    ]
+    if desc:
+        text_parts.append(f"📝 <b>Izoh (tovar):</b> {html.escape(desc)}")
+
+    text_parts.extend([
+        f"👤 <b>Mijoz:</b> {user_info_line}",
+        f"🆔 <b>Mijoz ID:</b> <code>{id_code}</code>",
+        f"📱 <b>Telefon:</b> {phone_esc}",
+        f"📍 <b>Manzil:</b> {hudud_esc} {address_esc}",
+        f"📅 <b>Ro'yxatga olingan sana:</b> {track_date}",
+        f"📊 <b>Holati:</b> <b>{status_icon}</b>"
+    ])
+
+    report = found.get("report")
+    if report:
+        text_parts.append(
+            f"\n🚚 <b>Avvalgi yuk hisoboti:</b>\n"
+            f"• Og'irligi: <b>{report.get('weight', 0)} kg</b>\n"
+            f"• Narxi: <b>${report.get('price_usd', 0)}</b> ({report.get('price_uzs', 0):,} so'm)\n"
+            f"• To'lov: <b>{report.get('payment_status')}</b>"
+        )
+
+    await message.answer(
+        "\n".join(text_parts),
+        parse_mode="HTML",
+        reply_markup=track_found_actions_keyboard(user_id, clean_query)
+    )
+
+@admin_router.message(Command("trek"))
+@admin_router.message(Command("track"))
+@admin_router.message(Command("qidir"))
+async def cmd_search_track(message: Message, state: FSMContext):
+    if not await check_admin_or_reject(message):
+        return
+
+    parts = message.text.strip().split(maxsplit=1)
+    if len(parts) > 1 and parts[1].strip():
+        await state.clear()
+        await search_and_display_track_info(message, parts[1].strip())
+        return
+
+    await state.set_state(AdminSearchTrackStates.entering_track_code)
+    await message.answer(
+        "🔍 <b>Trek-kod bo'yicha mijozni qidirish</b>\n\n"
+        "Qidirmoqchi bo'lgan trek-kodni kiriting:\n"
+        "<i>Masalan: <code>YT1234567890</code> yoki <code>SF123456</code></i>",
+        parse_mode="HTML",
+        reply_markup=cancel_search_track_keyboard()
+    )
+
+@admin_router.callback_query(F.data == "admin_action_search_track")
+async def callback_start_search_track(query: CallbackQuery, state: FSMContext):
+    if not await check_admin_or_reject(query):
+        return
+    await query.answer()
+    await state.set_state(AdminSearchTrackStates.entering_track_code)
+    await query.message.answer(
+        "🔍 <b>Trek-kod bo'yicha mijozni qidirish</b>\n\n"
+        "Qidirmoqchi bo'lgan trek-kodni kiriting:\n"
+        "<i>Masalan: <code>YT1234567890</code></i>",
+        parse_mode="HTML",
+        reply_markup=cancel_search_track_keyboard()
+    )
+
+@admin_router.callback_query(F.data == "admin_cancel_search_track")
+async def callback_cancel_search_track(query: CallbackQuery, state: FSMContext):
+    if not await check_admin_or_reject(query):
+        return
+    await state.clear()
+    await query.answer("Qidiruv bekor qilindi")
+    await callback_admin_panel(query)
+
+@admin_router.message(AdminSearchTrackStates.entering_track_code)
+async def state_process_track_search(message: Message, state: FSMContext):
+    if not await check_admin_or_reject(message):
+        return
+
+    if not message.text:
+        await message.answer("⚠️ Iltimos, trek-kodni matn ko'rinishida kiriting:", reply_markup=cancel_search_track_keyboard())
+        return
+
+    query_text = message.text.strip()
+    await state.clear()
+    await search_and_display_track_info(message, query_text)

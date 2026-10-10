@@ -60,6 +60,19 @@ SETTINGS_HEADERS = [
 ]
 GOOGLE_SHEET_SETTINGS_TAB = "Sozlamalar"
 
+USER_TRACK_HEADERS = [
+    "Sana",
+    "ID KOD",
+    "Ism",
+    "Familiya",
+    "Telefon",
+    "Trek-kod",
+    "Izoh",
+    "Holat",
+    "Telegram ID"
+]
+GOOGLE_SHEET_USER_TRACKS_TAB = "Mijoz treklari"
+
 class ImportResult(int):
     """
     Backwards-compatible integer that can also be unpacked as (success, count, msg).
@@ -170,6 +183,26 @@ class GoogleSheetManager:
         if not existing_rows or not existing_rows[0]:
             ws.append_row(SETTINGS_HEADERS)
             logger.info("Sozlamalar jadvali sarlavhalari yozildi.")
+        return ws
+
+    def _get_user_tracks_worksheet_sync(self) -> gspread.Worksheet:
+        sh = self._get_spreadsheet_sync()
+        try:
+            ws = sh.worksheet(GOOGLE_SHEET_USER_TRACKS_TAB)
+        except gspread.WorksheetNotFound:
+            ws = sh.add_worksheet(title=GOOGLE_SHEET_USER_TRACKS_TAB, rows=1000, cols=len(USER_TRACK_HEADERS) + 2)
+            logger.info(f"'{GOOGLE_SHEET_USER_TRACKS_TAB}' nomli yangi varaq yaratildi.")
+
+        existing_rows = ws.get_all_values()
+        if not existing_rows or not existing_rows[0]:
+            ws.append_row(USER_TRACK_HEADERS)
+            logger.info("Mijoz treklari jadvali sarlavhalari yozildi.")
+        elif len(existing_rows[0]) < len(USER_TRACK_HEADERS):
+            try:
+                for idx in range(len(existing_rows[0]), len(USER_TRACK_HEADERS)):
+                    ws.update_cell(1, idx + 1, USER_TRACK_HEADERS[idx])
+            except Exception as e:
+                logger.warning(f"Mijoz treklari sarlavhalarini yangilashda xatolik: {e}")
         return ws
 
     async def save_setting_to_sheets(self, key: str, value: str) -> Tuple[bool, str]:
@@ -815,6 +848,136 @@ class GoogleSheetManager:
             return ImportResult(imported, True, "Muvaffaqiyatli import qilindi")
         except Exception as e:
             logger.error(f"Google Sheetsdan yuklarni import qilishda xatolik: {e}")
+            return ImportResult(0, False, str(e))
+
+    async def append_user_track(self, user: dict, track_code: str, description: str = "", created_at: str = None) -> Tuple[bool, str]:
+        """
+        Appends user track to 'Mijoz treklari' sheet.
+        """
+        if not self.is_configured():
+            return False, "Google credentials mavjud emas."
+        async with self._lock:
+            try:
+                import datetime
+                loop = asyncio.get_running_loop()
+                def _do_append():
+                    ws = self._get_user_tracks_worksheet_sync()
+                    date_val = created_at or datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    row = [
+                        date_val,
+                        f"'{user.get('id_code', '')}",
+                        user.get("first_name", ""),
+                        user.get("last_name", ""),
+                        f"'{user.get('phone', '')}",
+                        track_code.strip().upper(),
+                        description.strip(),
+                        "Kutilmoqda",
+                        f"'{user.get('user_id', '')}"
+                    ]
+                    ws.append_row(row)
+                    return True, "Qo'shildi"
+
+                res, msg = await asyncio.wait_for(loop.run_in_executor(None, _do_append), timeout=25.0)
+                return res, msg
+            except Exception as e:
+                logger.error(f"Google Sheetsda mijoz trekini saqlashda xatolik: {e}")
+                self._gc = None
+                return False, str(e)
+
+    async def update_user_track_status(self, track_code: str, status: str = "Yetib kelgan") -> Tuple[bool, str]:
+        """
+        Updates status of user track in 'Mijoz treklari' sheet.
+        """
+        if not self.is_configured():
+            return False, "Google credentials mavjud emas."
+        async with self._lock:
+            try:
+                loop = asyncio.get_running_loop()
+                def _do_update():
+                    ws = self._get_user_tracks_worksheet_sync()
+                    all_rows = ws.get_all_values()
+                    if len(all_rows) < 2:
+                        return False, "Jadval bo'sh"
+
+                    clean_trk = track_code.strip().upper()
+                    updated = False
+                    for idx in range(1, len(all_rows)):
+                        row = all_rows[idx]
+                        if len(row) > 5 and str(row[5]).strip().upper() == clean_trk:
+                            ws.update_cell(idx + 1, 8, status)
+                            updated = True
+
+                    return (True, "Yangilandi") if updated else (False, "Trek topilmadi")
+
+                res, msg = await asyncio.wait_for(loop.run_in_executor(None, _do_update), timeout=25.0)
+                return res, msg
+            except Exception as e:
+                logger.error(f"Google Sheetsda trek holatini yangilashda xatolik: {e}")
+                self._gc = None
+                return False, str(e)
+
+    async def import_all_user_tracks_to_db(self) -> ImportResult:
+        """
+        Google Sheets 'Mijoz treklari' varag'idan barcha treklar ro'yxatini SQLite bazasiga import qiladi.
+        """
+        if not self.is_configured():
+            return ImportResult(0, False, "Google credentials mavjud emas")
+        try:
+            loop = asyncio.get_running_loop()
+            def _fetch_rows():
+                ws = self._get_user_tracks_worksheet_sync()
+                return ws.get_all_values()
+
+            rows = await asyncio.wait_for(loop.run_in_executor(None, _fetch_rows), timeout=25.0)
+            if len(rows) <= 1:
+                return ImportResult(0, True, "Mijoz treklari jadvali bo'sh")
+
+            imported = 0
+            async with get_connection() as db:
+                for row in rows[1:]:
+                    if not row or len(row) < 6:
+                        continue
+                    created_at = row[0].strip() if len(row) > 0 else ""
+                    id_code = row[1].strip().lstrip("'").upper() if len(row) > 1 else ""
+                    track_code = row[5].strip().upper() if len(row) > 5 else ""
+                    description = row[6].strip() if len(row) > 6 else ""
+                    status_raw = row[7].strip().lower() if len(row) > 7 else "kutilmoqda"
+                    status = "yetib_kelgan" if "yetib" in status_raw else "kutilmoqda"
+                    tg_id_str = row[8].strip().lstrip("'") if len(row) > 8 else ""
+                    user_id = int(tg_id_str) if tg_id_str.isdigit() else 0
+
+                    if not track_code:
+                        continue
+
+                    if not user_id and id_code:
+                        async with db.execute("SELECT user_id FROM users WHERE UPPER(id_code) = ?", (id_code,)) as u_cur:
+                            u_row = await u_cur.fetchone()
+                            if u_row:
+                                user_id = u_row[0]
+
+                    async with db.execute("""
+                        SELECT id FROM user_tracks
+                        WHERE (user_id = ? OR UPPER(id_code) = ?) AND UPPER(track_code) = ?
+                    """, (user_id, id_code, track_code)) as cur:
+                        exists = await cur.fetchone()
+
+                    if not exists:
+                        await db.execute("""
+                            INSERT INTO user_tracks (user_id, id_code, track_code, description, status, created_at, synced_to_sheets)
+                            VALUES (?, ?, ?, ?, ?, ?, 1)
+                        """, (user_id, id_code, track_code, description, status, created_at))
+                        imported += 1
+                    else:
+                        await db.execute("""
+                            UPDATE user_tracks
+                            SET status = ?, description = COALESCE(NULLIF(?, ''), description)
+                            WHERE id = ?
+                        """, (status, description, exists[0]))
+
+                await db.commit()
+            return ImportResult(imported, True, "Muvaffaqiyatli import qilindi")
+        except Exception as e:
+            logger.error(f"Google Sheetsdan mijoz treklarini import qilishda xatolik: {e}")
             return ImportResult(0, False, str(e))
 
 sheet_manager = GoogleSheetManager()

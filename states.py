@@ -23,3 +23,9 @@ class EditReportStates(StatesGroup):
     entering_new_weight = State()
     entering_new_tracks = State()
 
+class UserTrackStates(StatesGroup):
+    entering_track_code = State()
+
+class AdminSearchTrackStates(StatesGroup):
+    entering_track_code = State()
+

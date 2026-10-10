@@ -39,6 +39,7 @@ async def setup_bot_commands(bot: Bot):
                 [
                     BotCommand(command="admin", description="🛠 Admin boshqaruv paneli"),
                     BotCommand(command="report", description="📸 Foto-otchyot yuborish"),
+                    BotCommand(command="trek", description="🔍 Trek-kod qidirish (/trek kod)"),
                     BotCommand(command="tolandi", description="🟢 To'lovni tasdiqlash (/tolandi YK1 YK2)"),
                     BotCommand(command="users", description="👥 Mijozlar ro'yxati"),
                     BotCommand(command="kurs", description="💵 Dollar kursini sozlash"),
@@ -84,8 +85,9 @@ async def main():
             s_count = await sheet_manager.import_settings_from_sheets()
             u_count = await sheet_manager.import_all_users_to_db()
             c_count = await sheet_manager.import_all_cargos_to_db()
-            if s_count > 0 or u_count > 0 or c_count > 0:
-                logger.info(f"Google Sheetsdan {s_count} ta sozlama, {u_count} ta mijoz va {c_count} ta yuk hisoboti bazaga yuklandi.")
+            t_count = await sheet_manager.import_all_user_tracks_to_db()
+            if s_count > 0 or u_count > 0 or c_count > 0 or t_count > 0:
+                logger.info(f"Google Sheetsdan {s_count} ta sozlama, {u_count} ta mijoz, {c_count} ta yuk hisoboti va {t_count} ta mijoz treki yuklandi.")
     except Exception as e:
         logger.warning(f"Google Sheets avtomatik import xatosi: {e}")
 

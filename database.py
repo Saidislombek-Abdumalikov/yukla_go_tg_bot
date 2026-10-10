@@ -87,8 +87,24 @@ async def init_db():
                 value TEXT
             );
         """)
+
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS user_tracks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                id_code TEXT,
+                track_code TEXT,
+                description TEXT DEFAULT '',
+                status TEXT DEFAULT 'kutilmoqda',
+                created_at TEXT,
+                synced_to_sheets INTEGER DEFAULT 0
+            );
+        """)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_user_tracks_track_code ON user_tracks(track_code);")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_user_tracks_user_id ON user_tracks(user_id);")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_user_tracks_id_code ON user_tracks(id_code);")
         await db.commit()
-    logger.info("Database initialized with WAL mode, indexes, and tables (users, reports, settings).")
+    logger.info("Database initialized with WAL mode, indexes, and tables (users, reports, settings, user_tracks).")
 
 async def get_user(user_id: int):
     async with get_connection() as db:
@@ -487,4 +503,137 @@ async def delete_report(report_id: int) -> bool:
         cursor = await db.execute("DELETE FROM reports WHERE id = ?", (report_id,))
         await db.commit()
         return cursor.rowcount > 0
+
+# --- User Tracks (Mijoz treklari) Management ---
+async def add_user_track(user_id: int, id_code: str, track_code: str, description: str = "", created_at: str = None) -> tuple[bool, str, dict]:
+    clean_track = track_code.strip().upper()
+    if not clean_track:
+        return False, "Trek-kod bo'sh bo'lishi mumkin emas.", {}
+    if not created_at:
+        created_at = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    clean_id_code = (id_code or "").strip().upper()
+
+    async with get_connection() as db:
+        # Check if already added by this user
+        async with db.execute("""
+            SELECT id, track_code, description, status, created_at FROM user_tracks
+            WHERE user_id = ? AND UPPER(track_code) = ?
+        """, (user_id, clean_track)) as cursor:
+            existing = await cursor.fetchone()
+            if existing:
+                return False, f"Ushbu trek-kod ({clean_track}) allaqachon ro'yxatdan o'tkazilgan.", dict(existing)
+
+        cursor = await db.execute("""
+            INSERT INTO user_tracks (user_id, id_code, track_code, description, status, created_at)
+            VALUES (?, ?, ?, ?, 'kutilmoqda', ?)
+        """, (user_id, clean_id_code, clean_track, description.strip(), created_at))
+        await db.commit()
+        track_id = cursor.lastrowid
+        return True, "Muvaffaqiyatli saqlandi", {
+            "id": track_id,
+            "user_id": user_id,
+            "id_code": clean_id_code,
+            "track_code": clean_track,
+            "description": description.strip(),
+            "status": "kutilmoqda",
+            "created_at": created_at
+        }
+
+async def get_user_tracks(user_id: int) -> list[dict]:
+    async with get_connection() as db:
+        async with db.execute("""
+            SELECT * FROM user_tracks
+            WHERE user_id = ?
+            ORDER BY id DESC
+        """, (user_id,)) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(r) for r in rows]
+
+async def find_track_owner(track_query: str) -> dict | None:
+    """
+    Trek-kod egasini qidiradi:
+    1. Avval user_tracks jadvalida qidiradi (mijoz kutayotgan treklar).
+    2. Agar u yerda bo'lmasa, reports jadvalidan qidiradi.
+    """
+    clean_query = track_query.strip().upper()
+    if not clean_query:
+        return None
+
+    async with get_connection() as db:
+        # 1. user_tracks jadvalida qidirish
+        async with db.execute("""
+            SELECT ut.id as track_id, ut.track_code, ut.description, ut.status as track_status,
+                   ut.created_at as track_created_at, ut.id_code as ut_id_code,
+                   u.user_id, u.id_code as u_id_code, u.first_name, u.last_name, u.phone, u.hudud, u.address,
+                   u.username, u.status as user_status
+            FROM user_tracks ut
+            LEFT JOIN users u ON (ut.user_id = u.user_id OR UPPER(ut.id_code) = UPPER(u.id_code))
+            WHERE UPPER(ut.track_code) = ?
+            ORDER BY ut.id DESC
+            LIMIT 1
+        """, (clean_query,)) as cursor:
+            row = await cursor.fetchone()
+            if row:
+                res = dict(row)
+                res["source"] = "user_tracks"
+                res["id_code"] = res.get("u_id_code") or res.get("ut_id_code") or ""
+                # Check if this track also has a report
+                async with db.execute("""
+                    SELECT id, weight, price_usd, price_uzs, photo_file_id, payment_status, created_at
+                    FROM reports
+                    WHERE track_codes LIKE ? OR UPPER(track_codes) = ?
+                    ORDER BY id DESC LIMIT 1
+                """, (f"%{clean_query}%", clean_query)) as rep_cur:
+                    rep_row = await rep_cur.fetchone()
+                    if rep_row:
+                        res["report"] = dict(rep_row)
+                return res
+
+        # 2. reports jadvalida qidirish
+        async with db.execute("""
+            SELECT r.id as report_id, r.user_id, r.id_code, r.full_name, r.phone,
+                   r.track_codes, r.weight, r.price_usd, r.price_uzs, r.photo_file_id,
+                   r.payment_status, r.created_at as report_created_at,
+                   u.first_name, u.last_name, u.hudud, u.address, u.username
+            FROM reports r
+            LEFT JOIN users u ON (r.user_id = u.user_id OR UPPER(r.id_code) = UPPER(u.id_code))
+            WHERE UPPER(r.track_codes) LIKE ?
+            ORDER BY r.id DESC
+            LIMIT 1
+        """, (f"%{clean_query}%",)) as cursor:
+            row = await cursor.fetchone()
+            if row:
+                res = dict(row)
+                res["source"] = "reports"
+                res["track_code"] = clean_query
+                res["track_status"] = "yetib_kelgan"
+                return res
+
+    return None
+
+async def mark_user_tracks_arrived(track_codes: list[str]):
+    if not track_codes:
+        return
+    clean_codes = [c.strip().upper() for c in track_codes if c.strip()]
+    if not clean_codes:
+        return
+    placeholders = ",".join("?" for _ in clean_codes)
+    async with get_connection() as db:
+        await db.execute(f"""
+            UPDATE user_tracks
+            SET status = 'yetib_kelgan'
+            WHERE UPPER(track_code) IN ({placeholders})
+        """, clean_codes)
+        await db.commit()
+
+async def delete_user_track(track_id: int, user_id: int) -> bool:
+    async with get_connection() as db:
+        cursor = await db.execute("""
+            DELETE FROM user_tracks
+            WHERE id = ? AND user_id = ?
+        """, (track_id, user_id))
+        await db.commit()
+        return cursor.rowcount > 0
+
 

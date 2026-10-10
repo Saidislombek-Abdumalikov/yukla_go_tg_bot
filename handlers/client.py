@@ -3,7 +3,7 @@ import os
 import logging
 import html
 from aiogram import Router, F, Bot
-from aiogram.types import Message, FSInputFile, ReplyKeyboardRemove
+from aiogram.types import Message, FSInputFile, ReplyKeyboardRemove, CallbackQuery
 from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
 
@@ -15,7 +15,7 @@ from config import (
     ADMIN_IDS,
     format_warehouse_address
 )
-from states import RegistrationStates
+from states import RegistrationStates, UserTrackStates
 from keyboards import (
     terms_keyboard,
     region_keyboard,
@@ -23,11 +23,15 @@ from keyboards import (
     confirmation_keyboard,
     reapply_keyboard,
     approved_user_menu,
-    admin_decision_keyboard
+    admin_decision_keyboard,
+    user_tracks_action_keyboard,
+    cancel_user_track_keyboard
 )
 from database import (
     get_user,
-    save_application
+    save_application,
+    add_user_track,
+    get_user_tracks
 )
 from sheets import sheet_manager
 
@@ -454,4 +458,146 @@ async def contact_admin(message: Message):
     await message.answer(
         f"Savollar yoki murojaatlar bo'lsa adminga yozishingiz mumkin:\n👉 {SUPPORT_ADMIN_USERNAME}"
     )
+
+# --- User Tracks (Mijoz treklari) Handlers ---
+@client_router.message(F.text == "📦 Trek-kodlarim")
+async def show_my_tracks(message: Message):
+    user = await get_user(message.from_user.id)
+    if not user or user.get("status") != "approved":
+        await message.answer("Trek-kodlarni boshqarish faqat tasdiqlangan mijozlar uchun mavjud.")
+        return
+
+    tracks = await get_user_tracks(message.from_user.id)
+    if not tracks:
+        await message.answer(
+            "📦 <b>Sizda hali saqlangan trek-kodlar yo'q.</b>\n\n"
+            "Xarid qilgan tovarlaringizning trek-kodlarini qo'shib qo'ysangiz, ular omborga yetib kelganda oson topiladi va hisobot beriladi.",
+            parse_mode="HTML",
+            reply_markup=user_tracks_action_keyboard()
+        )
+        return
+
+    lines = [f"📦 <b>Sizning trek-kodlaringiz ({len(tracks)} ta):</b>\n"]
+    for idx, t in enumerate(tracks[:25], 1):
+        trk = html.escape(t.get("track_code") or "")
+        desc = html.escape(t.get("description") or "")
+        status = t.get("status", "kutilmoqda")
+        if status == "yetib_kelgan":
+            st_text = "✅ Yetib kelgan"
+        else:
+            st_text = "⏳ Kutilmoqda"
+        desc_str = f" <i>({desc})</i>" if desc else ""
+        date_str = (t.get("created_at") or "")[:10]
+        lines.append(f"{idx}. <code>{trk}</code>{desc_str} — {st_text} <i>({date_str})</i>")
+
+    if len(tracks) > 25:
+        lines.append(f"\n<i>...va yana {len(tracks) - 25} ta trek-kod</i>")
+
+    await message.answer("\n".join(lines), parse_mode="HTML", reply_markup=user_tracks_action_keyboard())
+
+@client_router.callback_query(F.data == "client_add_track")
+@client_router.message(F.text == "➕ Trek-kod qo'shish")
+async def start_add_track(event: Message | CallbackQuery, state: FSMContext):
+    user_id = event.from_user.id
+    user = await get_user(user_id)
+    if not user or user.get("status") != "approved":
+        if isinstance(event, CallbackQuery):
+            await event.answer("Faqat tasdiqlangan mijozlar uchun", show_alert=True)
+        else:
+            await event.answer("Faqat tasdiqlangan mijozlar uchun.")
+        return
+
+    await state.set_state(UserTrackStates.entering_track_code)
+    prompt_text = (
+        "📦 <b>Trek-kod qo'shish</b>\n\n"
+        "Buyurtmangizning trek-kodini va ixtiyoriy ravishda izohini (nomini) yuboring.\n\n"
+        "<i>Misol:</i>\n"
+        "<code>YT1234567890 Krossovka</code>\n"
+        "yoki faqat:\n"
+        "<code>YT1234567890</code>\n\n"
+        "<i>Bir nechta trek-kod bo'lsa, har birini yangi qatordan yozishingiz mumkin.</i>"
+    )
+    if isinstance(event, CallbackQuery):
+        await event.answer()
+        await event.message.answer(prompt_text, parse_mode="HTML", reply_markup=cancel_user_track_keyboard())
+    else:
+        await event.answer(prompt_text, parse_mode="HTML", reply_markup=cancel_user_track_keyboard())
+
+@client_router.callback_query(F.data == "cancel_user_track")
+async def cancel_user_track_handler(query: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await query.answer()
+    await query.message.answer("Trek-kod qo'shish bekor qilindi.", reply_markup=approved_user_menu())
+
+@client_router.message(UserTrackStates.entering_track_code)
+async def process_user_track_input(message: Message, state: FSMContext):
+    if not message.text:
+        await message.answer(
+            "⚠️ Iltimos, trek-kodni matn shaklida yuboring.",
+            reply_markup=cancel_user_track_keyboard()
+        )
+        return
+
+    text = message.text.strip()
+    if text in ["🆔 Mening ID kodim", "🇨🇳 Xitoy ombor manzili", "📦 Trek-kodlarim", "➕ Trek-kod qo'shish", "📋 Shartlar va Qoidalar", "📞 Admin bilan bog'lanish"]:
+        await state.clear()
+        return
+
+    user = await get_user(message.from_user.id)
+    if not user or user.get("status") != "approved":
+        await state.clear()
+        await message.answer("Siz tasdiqlangan mijoz emassiz.")
+        return
+
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        await message.answer("⚠️ Hech qanday trek-kod topilmadi. Qaytadan kiriting:", reply_markup=cancel_user_track_keyboard())
+        return
+
+    added = []
+    already_exists = []
+
+    for line in lines:
+        parts = line.split(maxsplit=1)
+        raw_code = parts[0].strip()
+        trk = re.sub(r'^[^\w]+|[^\w]+$', '', raw_code).upper()
+        if len(trk) < 3:
+            continue
+        desc = parts[1].strip() if len(parts) > 1 else ""
+
+        ok, msg, track_info = await add_user_track(
+            user_id=user["user_id"],
+            id_code=user.get("id_code", ""),
+            track_code=trk,
+            description=desc
+        )
+        if ok:
+            added.append((trk, desc))
+            try:
+                await sheet_manager.append_user_track(user, trk, desc, track_info.get("created_at"))
+            except Exception as e:
+                logger.warning(f"Sheetsga trek yozishda xatolik: {e}")
+        else:
+            already_exists.append(trk)
+
+    await state.clear()
+
+    resp = []
+    if added:
+        resp.append(f"✅ <b>{len(added)} ta trek-kod muvaffaqiyatli saqlandi!</b>\n")
+        for trk, desc in added:
+            desc_str = f" <i>({html.escape(desc)})</i>" if desc else ""
+            resp.append(f"• <code>{html.escape(trk)}</code>{desc_str}")
+
+    if already_exists:
+        if added:
+            resp.append("")
+        resp.append("ℹ️ <b>Quyidagi trek-kodlar allaqachon mavjud:</b>")
+        for trk in already_exists:
+            resp.append(f"• <code>{html.escape(trk)}</code>")
+
+    if not added and not already_exists:
+        resp.append("⚠️ Noto'g'ri format. Trek-kod kamida 3 ta belgidan iborat bo'lishi kerak.")
+
+    await message.answer("\n".join(resp), parse_mode="HTML", reply_markup=approved_user_menu())
 

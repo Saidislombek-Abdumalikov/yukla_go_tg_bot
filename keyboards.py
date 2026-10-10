@@ -73,9 +73,24 @@ def approved_user_menu() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="🆔 Mening ID kodim"), KeyboardButton(text="🇨🇳 Xitoy ombor manzili")],
+            [KeyboardButton(text="📦 Trek-kodlarim"), KeyboardButton(text="➕ Trek-kod qo'shish")],
             [KeyboardButton(text="📋 Shartlar va Qoidalar"), KeyboardButton(text="📞 Admin bilan bog'lanish")]
         ],
         resize_keyboard=True
+    )
+
+def user_tracks_action_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="➕ Yangi trek-kod qo'shish", callback_data="client_add_track")]
+        ]
+    )
+
+def cancel_user_track_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Bekor qilish", callback_data="cancel_user_track")]
+        ]
     )
 
 def admin_panel_keyboard() -> InlineKeyboardMarkup:
@@ -85,11 +100,34 @@ def admin_panel_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="📸 Foto-otchyot yuborish", callback_data="admin_action_report"),
             ],
             [
+                InlineKeyboardButton(text="🔍 Trek-kod qidirish", callback_data="admin_action_search_track"),
+            ],
+            [
                 InlineKeyboardButton(text="👥 Mijozlar ro'yxati", callback_data="admin_action_users_1"),
                 InlineKeyboardButton(text="📊 Yangilash", callback_data="admin_action_stats")
             ]
         ]
     )
+
+def cancel_search_track_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Qidiruvni bekor qilish", callback_data="admin_cancel_search_track")]
+        ]
+    )
+
+def track_found_actions_keyboard(user_id: int, track_code: str = "") -> InlineKeyboardMarkup:
+    buttons = []
+    if user_id:
+        buttons.append([
+            InlineKeyboardButton(text="📸 Ushbu mijozga foto-otchyot", callback_data=f"create_report_for_{user_id}"),
+            InlineKeyboardButton(text="👤 Mijoz kartochkasi", callback_data=f"view_user_{user_id}")
+        ])
+    buttons.append([
+        InlineKeyboardButton(text="🔍 Boshqa trek qidirish", callback_data="admin_action_search_track"),
+        InlineKeyboardButton(text="🔙 Asosiy panel", callback_data="admin_back_to_panel")
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 def cancel_fsm_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
