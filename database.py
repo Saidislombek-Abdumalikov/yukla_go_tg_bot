@@ -40,6 +40,12 @@ async def init_db():
                 synced_to_sheets INTEGER DEFAULT 0
             );
         """)
+        # Column migration if users was created earlier without synced_to_sheets
+        async with db.execute("PRAGMA table_info(users);") as cursor:
+            u_cols = [row[1] for row in await cursor.fetchall()]
+            if "synced_to_sheets" not in u_cols:
+                await db.execute("ALTER TABLE users ADD COLUMN synced_to_sheets INTEGER DEFAULT 0;")
+
         await db.execute("CREATE INDEX IF NOT EXISTS idx_users_status ON users(status);")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_users_id_code ON users(id_code);")
 
@@ -63,8 +69,6 @@ async def init_db():
                 report_uid TEXT UNIQUE
             );
         """)
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_reports_id_code ON reports(id_code);")
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_reports_report_uid ON reports(report_uid);")
 
         # Column migration if reports was created earlier without payment_status, message tracking, or report_uid
         async with db.execute("PRAGMA table_info(reports);") as cursor:
@@ -79,7 +83,9 @@ async def init_db():
                 await db.execute("ALTER TABLE reports ADD COLUMN channel_chat_id TEXT;")
             if "report_uid" not in cols:
                 await db.execute("ALTER TABLE reports ADD COLUMN report_uid TEXT;")
-                await db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_reports_report_uid ON reports(report_uid);")
+
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_reports_id_code ON reports(id_code);")
+        await db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_reports_report_uid ON reports(report_uid);")
 
         await db.execute("""
             CREATE TABLE IF NOT EXISTS settings (

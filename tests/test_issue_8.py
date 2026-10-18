@@ -38,7 +38,8 @@ class TestIssue8SyncSheetsAccuracyAndReconciliation(unittest.IsolatedAsyncioTest
         # 1. Yuklarni import qilish xato beradi (masalan, exception yoki (False, err))
         with patch.object(sheet_manager, "is_configured", return_value=True), \
              patch.object(sheet_manager, "import_all_users_to_db", new=AsyncMock(return_value=(True, 5, "ok"))), \
-             patch.object(sheet_manager, "import_all_cargos_to_db", new=AsyncMock(return_value=(False, 0, "Google API Quota Exceeded"))):
+             patch.object(sheet_manager, "import_all_cargos_to_db", new=AsyncMock(return_value=(False, 0, "Google API Quota Exceeded"))), \
+             patch.object(sheet_manager, "import_settings_from_sheets", new=AsyncMock(return_value=(True, 0, "ok"))):
 
             msg = MockMessage(text="/sync_sheets", from_user_id=self.admin_id)
             await cmd_sync_sheets(msg)

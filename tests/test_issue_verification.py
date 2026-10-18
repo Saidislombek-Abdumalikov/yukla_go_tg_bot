@@ -47,6 +47,7 @@ class TestVerificationAudit(unittest.IsolatedAsyncioTestCase):
              patch.object(main.sheet_manager, "import_settings_from_sheets", new=AsyncMock(return_value=2)) as mock_settings, \
              patch.object(main.sheet_manager, "import_all_users_to_db", new=AsyncMock(return_value=3)) as mock_users, \
              patch.object(main.sheet_manager, "import_all_cargos_to_db", new=AsyncMock(return_value=5)) as mock_cargos, \
+             patch.object(main.sheet_manager, "import_all_user_tracks_to_db", new=AsyncMock(return_value=4)) as mock_tracks, \
              patch("main.init_db", new=AsyncMock()), \
              patch("main.BOT_TOKEN", "valid_token"), \
              patch("main.start_render_health_server", new=AsyncMock()), \
@@ -70,6 +71,7 @@ class TestVerificationAudit(unittest.IsolatedAsyncioTestCase):
             mock_settings.assert_awaited_once()
             mock_users.assert_awaited_once()
             mock_cargos.assert_awaited_once()
+            mock_tracks.assert_awaited_once()
 
     async def test_import_does_not_wipe_out_local_cargos_on_partial_or_missing_uids(self):
         """2-tekshiruv: Sheets importi lokal bazadagi mavjud yuklarni o'chirib yubormasligi kerak!"""
