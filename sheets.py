@@ -145,6 +145,8 @@ class GoogleSheetManager:
         elif len(existing_rows[0]) < len(USER_HEADERS):
             # Yangi ustunlar sarlavhalarini to'ldirish
             try:
+                if worksheet.col_count < len(USER_HEADERS):
+                    worksheet.add_cols(len(USER_HEADERS) - worksheet.col_count)
                 for idx in range(len(existing_rows[0]), len(USER_HEADERS)):
                     worksheet.update_cell(1, idx + 1, USER_HEADERS[idx])
             except Exception as e:
@@ -165,6 +167,8 @@ class GoogleSheetManager:
             logger.info("Yuklar jadvali sarlavhalari yozildi.")
         elif len(existing_rows[0]) < len(CARGO_HEADERS):
             try:
+                if ws.col_count < len(CARGO_HEADERS):
+                    ws.add_cols(len(CARGO_HEADERS) - ws.col_count)
                 for idx in range(len(existing_rows[0]), len(CARGO_HEADERS)):
                     ws.update_cell(1, idx + 1, CARGO_HEADERS[idx])
             except Exception as e:
@@ -199,6 +203,8 @@ class GoogleSheetManager:
             logger.info("Mijoz treklari jadvali sarlavhalari yozildi.")
         elif len(existing_rows[0]) < len(USER_TRACK_HEADERS):
             try:
+                if ws.col_count < len(USER_TRACK_HEADERS):
+                    ws.add_cols(len(USER_TRACK_HEADERS) - ws.col_count)
                 for idx in range(len(existing_rows[0]), len(USER_TRACK_HEADERS)):
                     ws.update_cell(1, idx + 1, USER_TRACK_HEADERS[idx])
             except Exception as e:
